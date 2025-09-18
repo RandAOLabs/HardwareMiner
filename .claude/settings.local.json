@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "Bash(mkdir:*)",
+      "Bash(npm install:*)"
+    ]
+  },
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "shadcn-ui-svelte",
+    "permamind",
+    "playwright"
+  ]
+}
