@@ -1,10 +1,38 @@
 {
   "permissions": {
     "allow": [
-      "WebSearch",
-      "Bash(mkdir:*)",
-      "Bash(npm install:*)"
-    ]
+      "Bash(npm test:*)",
+      "Bash(npm run android:*)",
+      "Bash(npx kill-port:*)",
+      "Bash(npx expo start:*)",
+      "Bash(adb:*)",
+      "Bash(taskkill:*)",
+      "Bash(npm run web:*)",
+      "WebFetch(domain:github.com)",
+      "Bash(chmod:*)",
+      "Bash(npx expo prebuild:*)",
+      "Bash(npm start)",
+      "Bash(npx expo build:android:*)",
+      "Bash(./gradlew:*)",
+      "Bash(npm install:*)",
+      "Bash(timeout:*)",
+      "Bash(netstat:*)",
+      "Bash(findstr:*)",
+      "Bash(cmd.exe:*)",
+      "Bash(explorer:*)",
+      "Bash(npx expo:*)",
+      "Bash(dir \"C:\\AI\\HardwareMiner\\app\\RNG-APP\\android\\app\\build\\outputs\\apk\\release\")",
+      "Bash(npm view:*)",
+      "Bash(npm uninstall:*)",
+      "Bash(npx tsc:*)",
+      "Bash(node:*)",
+      "Bash(aapt dump badging:*)",
+      "Bash(find:*)",
+      "Bash(npm run build:*)",
+      "Bash(npm run:*)"
+    ],
+    "deny": [],
+    "ask": []
   },
   "enableAllProjectMcpServers": true,
   "enabledMcpjsonServers": [
