@@ -2,10 +2,19 @@
 #
 # RNG Miner Orange Pi Installation Script
 #
+# ⚠️  CRITICAL: This script is designed to run ONCE on a fresh system.
+#
+# INSTALL-ONCE PHILOSOPHY:
+# - Every test starts with a fresh device image
+# - This script runs ONCE and must work perfectly
+# - NO patches, NO fixes, NO manual intervention after install
+# - If install fails, the device is wiped and this script is run again
+# - See DEVELOPER_README.md for complete details
+#
 # This script sets up everything needed for the RNG Miner device:
-# - HTTP server with HTTPS
+# - HTTP server on port 80
 # - WiFi hotspot capability
-# - Mining software preparation
+# - Device configuration API
 # - Auto-start services
 #
 # Usage: sudo ./install.sh
@@ -128,6 +137,32 @@ fi
 # Copy all files to installation directory
 log "📋 Copying RNG Miner files..."
 cp -r "$SCRIPT_DIR"/* "$INSTALL_DIR/"
+
+# CRITICAL: Copy device software to proper location
+log "📦 Installing device software to /opt/device-software..."
+mkdir -p /opt/device-software/src/http-server
+mkdir -p /opt/device-software/config
+mkdir -p /opt/device-software/data
+mkdir -p /opt/device-software/logs
+
+# Copy the HTTP server from the repo structure
+if [[ -d "$SCRIPT_DIR/opt/device-software" ]]; then
+    cp -r "$SCRIPT_DIR/opt/device-software"/* /opt/device-software/
+    log "✅ Device software copied from repo structure"
+elif [[ -f "$SCRIPT_DIR/server.py" ]]; then
+    # Fallback: if server.py is in root, copy it
+    cp "$SCRIPT_DIR/server.py" /opt/device-software/src/http-server/
+    log "✅ Server script copied from root"
+else
+    error "Server script not found in $SCRIPT_DIR or $SCRIPT_DIR/opt/device-software"
+fi
+
+# Verify server file exists
+if [[ ! -f "/opt/device-software/src/http-server/server.py" ]]; then
+    error "CRITICAL: Server script not found at /opt/device-software/src/http-server/server.py after copy"
+fi
+
+log "✅ Server script verified at /opt/device-software/src/http-server/server.py"
 
 # Set up Python virtual environment (quiet)
 log "🐍 Setting up Python environment..."

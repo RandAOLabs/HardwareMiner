@@ -95,17 +95,25 @@ else
 fi
 
 # Start HTTP server
-log "🌐 Starting HTTP server on port 8080..."
+log "🌐 Starting HTTP server on port 80..."
 
-# Check if port 8080 is already in use
-if ss -tulpn | grep -q ":8080 "; then
-    log "⚠️ Port 8080 is already in use, attempting to stop existing server..."
+# Server location
+SERVER_SCRIPT="/opt/device-software/src/http-server/server.py"
+
+# Verify server file exists
+if [[ ! -f "$SERVER_SCRIPT" ]]; then
+    error_exit "Server script not found at: $SERVER_SCRIPT"
+fi
+
+# Check if port 80 is already in use
+if ss -tulpn | grep -q ":80 "; then
+    log "⚠️ Port 80 is already in use, attempting to stop existing server..."
     pkill -f "python.*server.py" 2>/dev/null || true
     sleep 2
 fi
 
 # Start the HTTP server in background
-python3 server.py &
+python3 "$SERVER_SCRIPT" &
 SERVER_PID=$!
 
 # Save PID
@@ -123,10 +131,10 @@ if kill -0 $SERVER_PID 2>/dev/null; then
 
     if [[ "$WIFI_CONNECTED" == "false" ]]; then
         log "📱 Connect to WiFi: RNG-Miner-${DEVICE_ID}"
-        log "🔗 Setup URL: http://192.168.4.1:8080"
+        log "🔗 Setup URL: http://192.168.4.1"
     else
         LOCAL_IP=$(ip route get 1 2>/dev/null | awk '{print $7; exit}' 2>/dev/null || echo "unknown")
-        log "🔗 Server URL: http://${LOCAL_IP}:8080"
+        log "🔗 Server URL: http://${LOCAL_IP}"
     fi
 else
     error_exit "HTTP server failed to start"

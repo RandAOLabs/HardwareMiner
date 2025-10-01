@@ -142,6 +142,77 @@ for config_item in "${configs[@]}"; do
 done
 
 echo ""
+echo -e "${BLUE}🐍 HTTP SERVER STATUS${NC}"
+echo "====================="
+
+# Check server file location
+SERVER_SCRIPT="/opt/device-software/src/http-server/server.py"
+if [[ -f "$SERVER_SCRIPT" ]]; then
+    echo -e "${GREEN}✅ Server script: Found at $SERVER_SCRIPT${NC}"
+
+    # Check if server is running
+    if pgrep -f "$SERVER_SCRIPT" > /dev/null; then
+        echo -e "${GREEN}✅ Server process: Running${NC}"
+        server_pid=$(pgrep -f "$SERVER_SCRIPT")
+        echo "   PID: $server_pid"
+    else
+        echo -e "${RED}❌ Server process: Not running${NC}"
+    fi
+
+    # Check port 80
+    if ss -tulpn | grep -q ":80 "; then
+        echo -e "${GREEN}✅ Port 80: In use (server should be listening)${NC}"
+        ss -tulpn | grep ":80 " | head -1
+    else
+        echo -e "${RED}❌ Port 80: Not in use (server not listening)${NC}"
+    fi
+
+    # Test if we can import the server module
+    echo ""
+    echo "Testing Python dependencies..."
+    if python3 -c "import sys; sys.path.insert(0, '/opt/device-software/src/http-server'); from pathlib import Path; from flask import Flask; from flask_cors import CORS; print('✅ All Python dependencies available')" 2>/dev/null; then
+        echo -e "${GREEN}✅ Python dependencies: OK${NC}"
+    else
+        echo -e "${RED}❌ Python dependencies: Missing modules${NC}"
+        echo "   Try: pip3 install flask flask-cors"
+    fi
+else
+    echo -e "${RED}❌ Server script: NOT FOUND at $SERVER_SCRIPT${NC}"
+    echo "   Expected location: $SERVER_SCRIPT"
+    echo "   Searching for server.py files..."
+    find /opt -name "server.py" 2>/dev/null | head -5 || echo "   No server.py files found"
+fi
+
+# Check startup script
+echo ""
+echo "Startup Configuration:"
+START_SCRIPT="/opt/rng-miner/start.sh"
+if [[ -f "$START_SCRIPT" ]]; then
+    echo -e "${GREEN}✅ Start script: Found${NC}"
+
+    # Check if start.sh references the correct server path
+    if grep -q "/opt/device-software/src/http-server/server.py" "$START_SCRIPT"; then
+        echo -e "${GREEN}✅ Start script points to correct server location${NC}"
+    else
+        echo -e "${RED}❌ Start script has wrong server path${NC}"
+        echo "   Current server reference in start.sh:"
+        grep "server.py" "$START_SCRIPT" | head -3
+    fi
+else
+    echo -e "${RED}❌ Start script: Not found at $START_SCRIPT${NC}"
+fi
+
+# Check for recent startup errors
+echo ""
+echo "Recent startup logs:"
+if [[ -f "/var/log/rng-miner/startup.log" ]]; then
+    echo "Last 5 lines from startup.log:"
+    tail -5 /var/log/rng-miner/startup.log 2>/dev/null || echo "Cannot read startup.log"
+else
+    echo -e "${YELLOW}⚠️  No startup.log found${NC}"
+fi
+
+echo ""
 echo -e "${BLUE}🔍 NETWORK MANAGER STATUS${NC}"
 echo "========================="
 
@@ -201,36 +272,44 @@ fi
 echo ""
 echo -e "${BLUE}💡 MANUAL TESTS TO TRY${NC}"
 echo "====================="
-echo "1. Test dnsmasq configuration:"
+echo "1. Test HTTP server manually:"
+echo "   sudo python3 /opt/device-software/src/http-server/server.py"
+echo ""
+echo "2. Check if server can bind to port 80:"
+echo "   sudo lsof -i :80"
+echo "   sudo ss -tulpn | grep :80"
+echo ""
+echo "3. Test dnsmasq configuration:"
 echo "   sudo dnsmasq --test --conf-file=/etc/dnsmasq.conf"
 echo ""
-echo "2. Manual dnsmasq start (direct method):"
+echo "4. Manual dnsmasq start (direct method):"
 echo "   sudo systemctl stop systemd-resolved"
 echo "   sudo pkill dnsmasq"
 echo "   sudo dnsmasq --interface=wlan0 --bind-interfaces --listen-address=192.168.4.1 --conf-file=/etc/dnsmasq.conf --keep-in-foreground"
 echo ""
-echo "3. Manual hostapd start:"
+echo "5. Manual hostapd start:"
 echo "   sudo pkill hostapd"
 echo "   sudo hostapd -B /etc/hostapd/hostapd.conf"
 echo ""
-echo "4. Manual WiFi interface setup:"
+echo "6. Manual WiFi interface setup:"
 echo "   sudo systemctl stop NetworkManager"
 echo "   sudo ip link set wlan0 down"
 echo "   sudo ip addr flush dev wlan0"
 echo "   sudo ip link set wlan0 up"
 echo "   sudo ip addr add 192.168.4.1/24 dev wlan0"
 echo ""
-echo "5. Full manual WiFi hotspot test:"
+echo "7. Full manual WiFi hotspot test:"
 echo "   cd /opt/rng-miner && source venv/bin/activate"
 echo "   python3 -c \"from wifi_manager import WiFiManager; WiFiManager().start_hotspot()\""
 echo ""
-echo "6. Check process status:"
-echo "   ps aux | grep -E '(dnsmasq|hostapd)'"
-echo "   ss -tulpn | grep :53"
+echo "8. Check process status:"
+echo "   ps aux | grep -E '(server.py|dnsmasq|hostapd)'"
+echo "   ss -tulpn | grep -E '(:53|:80)'"
 echo ""
-echo "7. Check detailed logs:"
-echo "   sudo journalctl -u rng-miner -f"
-echo "   tail -f /var/log/rng-miner/http-server.log"
+echo "9. Check detailed logs:"
+echo "   sudo journalctl -u rng-miner -n 50 --no-pager"
+echo "   tail -20 /var/log/rng-miner/startup.log"
+echo "   tail -20 /opt/device-software/logs/http-server.log"
 echo ""
 echo -e "${YELLOW}🔧 QUICK RESET COMMANDS${NC}"
 echo "======================"

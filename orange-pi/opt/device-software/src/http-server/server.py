@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Orange Pi HTTP Server
-Lightweight HTTPS server for device communication
+Enhanced Orange Pi HTTP Server
+Complete implementation with configuration management and API endpoints
+Based on working old-bad-way patterns
 """
 
 import os
@@ -11,258 +12,237 @@ import time
 import signal
 import logging
 import hashlib
+import subprocess
 import threading
 from datetime import datetime, timezone
-from flask import Flask, jsonify, request
-from OpenSSL import SSL, crypto
+from pathlib import Path
+from flask import Flask, jsonify, request, Response
+from flask_cors import CORS
 import socket
 
-# Import WiFi manager
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'wifi-manager'))
-try:
-    from wifi_manager import WiFiManager
-except ImportError:
-    logging.warning("WiFi manager not available - hotspot features disabled")
-    WiFiManager = None
+# Configuration paths
+CONFIG_DIR = Path("/opt/device-software/config")
+DATA_DIR = Path("/opt/device-software/data")
+LOG_DIR = Path("/opt/device-software/logs")
+MINING_DIR = Path("/opt/mining/Randomness-Provider/docker-compose")
 
-class DeviceHTTPServer:
-    def __init__(self, config_path="/opt/device-software/config/device-config.json"):
+# Ensure directories exist
+CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+MINING_DIR.mkdir(parents=True, exist_ok=True)
+
+class EnhancedDeviceServer:
+    def __init__(self):
         self.app = Flask(__name__)
-        self.config_path = config_path
-        self.config = self.load_config()
+        CORS(self.app)  # Enable CORS for mobile app access
+
+        self.config_file = CONFIG_DIR / "device_config.json"
+        self.mining_config_file = CONFIG_DIR / "mining_config.json"
+        self.wifi_config_file = CONFIG_DIR / "wifi_config.json"
+        self.env_file = MINING_DIR / ".env"
+
         self.server_start_time = time.time()
-        self.device_id = self.generate_device_id()
+        self.device_id = self.get_device_id()
         self.setup_logging()
         self.setup_routes()
-        self.cert_file = "/opt/device-software/config/server.crt"
-        self.key_file = "/opt/device-software/config/server.key"
-        self.running = False
-
-        # Initialize WiFi manager if available
-        self.wifi_manager = None
-        if WiFiManager:
-            try:
-                self.wifi_manager = WiFiManager(config_path=config_path)
-            except Exception as e:
-                logging.error(f"Failed to initialize WiFi manager: {e}")
-
-    def load_config(self):
-        """Load device configuration from JSON file"""
-        default_config = {
-            "device_id": "",
-            "http_port": 80,
-            "wifi_state_timeout": 30,
-            "dhcp_range": "192.168.4.0/24",
-            "connection_retry_limit": 3,
-            "api_rate_limit": {
-                "requests_per_minute": 30,
-                "burst_limit": 100
-            }
-        }
-
-        try:
-            if os.path.exists(self.config_path):
-                with open(self.config_path, 'r') as f:
-                    config = json.load(f)
-                    # Merge with defaults
-                    default_config.update(config)
-            return default_config
-        except Exception as e:
-            logging.error(f"Failed to load config: {e}")
-            return default_config
-
-    def save_config(self):
-        """Save current configuration to file"""
-        try:
-            os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
-            self.config["device_id"] = self.device_id
-            with open(self.config_path, 'w') as f:
-                json.dump(self.config, f, indent=2)
-        except Exception as e:
-            logging.error(f"Failed to save config: {e}")
-
-    def generate_device_id(self):
-        """Generate 8-character unique device ID based on hardware identifiers"""
-        # Check if device ID already exists in config
-        if self.config.get("device_id"):
-            return self.config["device_id"]
-
-        try:
-            # Collect hardware identifiers
-            identifiers = []
-
-            # MAC address (primary network interface)
-            try:
-                import uuid
-                mac_address = ':'.join(['{:02x}'.format((uuid.getnode() >> elements) & 0xff)
-                                      for elements in range(0,2*6,2)][::-1])
-                identifiers.append(mac_address)
-            except:
-                pass
-
-            # CPU serial number (if available)
-            try:
-                with open('/proc/cpuinfo', 'r') as f:
-                    for line in f:
-                        if line.startswith('Serial'):
-                            identifiers.append(line.split(':')[1].strip())
-                            break
-            except:
-                pass
-
-            # Machine ID
-            try:
-                with open('/etc/machine-id', 'r') as f:
-                    identifiers.append(f.read().strip())
-            except:
-                pass
-
-            # Hostname
-            try:
-                identifiers.append(socket.gethostname())
-            except:
-                pass
-
-            # Fallback to current timestamp if no hardware identifiers found
-            if not identifiers:
-                identifiers.append(str(int(time.time())))
-
-            # Create hash from all identifiers
-            combined = ''.join(identifiers)
-            hash_object = hashlib.sha256(combined.encode())
-            device_id = hash_object.hexdigest()[:8].upper()
-
-            return device_id
-
-        except Exception as e:
-            logging.error(f"Failed to generate device ID: {e}")
-            # Fallback to timestamp-based ID
-            return hashlib.sha256(str(time.time()).encode()).hexdigest()[:8].upper()
 
     def setup_logging(self):
-        """Configure logging system with rotation"""
-        log_dir = "/opt/device-software/logs"
-        os.makedirs(log_dir, exist_ok=True)
+        """Configure logging system"""
+        log_file = LOG_DIR / "http-server.log"
 
-        log_file = os.path.join(log_dir, "http-server.log")
-
-        # Configure logging format
         logging.basicConfig(
             level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s',
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
             handlers=[
                 logging.FileHandler(log_file),
-                logging.StreamHandler(sys.stdout)
+                logging.StreamHandler()
             ]
         )
+        self.logger = logging.getLogger(__name__)
+        self.logger.info(f"Enhanced server initializing - Device ID: {self.device_id}")
 
-        # Log server startup
-        logging.info(f"HTTP Server initializing - Device ID: {self.device_id}")
+    def get_device_id(self):
+        """Generate or retrieve device ID"""
+        device_id_file = DATA_DIR / 'device_id'
 
-    def generate_self_signed_cert(self):
-        """Generate self-signed certificate for HTTPS"""
+        if device_id_file.exists():
+            with open(device_id_file, 'r') as f:
+                return f.read().strip()
+
+        # Generate new device ID
+        identifiers = []
+
         try:
-            # Create certificate directory
-            os.makedirs(os.path.dirname(self.cert_file), exist_ok=True)
+            # Get MAC address
+            import uuid
+            mac = ':'.join(['{:02x}'.format((uuid.getnode() >> i) & 0xff) for i in range(0,48,8)])
+            identifiers.append(mac)
+        except:
+            pass
 
-            # Check if certificate already exists and is valid
-            if os.path.exists(self.cert_file) and os.path.exists(self.key_file):
-                logging.info("Using existing SSL certificate")
-                return
+        try:
+            # Get machine ID
+            with open('/etc/machine-id', 'r') as f:
+                identifiers.append(f.read().strip())
+        except:
+            pass
 
-            # Generate private key
-            key = crypto.PKey()
-            key.generate_key(crypto.TYPE_RSA, 2048)
+        try:
+            # Get hostname
+            identifiers.append(socket.gethostname())
+        except:
+            pass
 
-            # Generate certificate
-            cert = crypto.X509()
-            cert.get_subject().C = "US"
-            cert.get_subject().ST = "CA"
-            cert.get_subject().L = "Device"
-            cert.get_subject().O = "RNG Miner"
-            cert.get_subject().OU = "Device"
-            cert.get_subject().CN = "RNG-Miner"
+        # Create hash from identifiers
+        combined = '-'.join(identifiers)
+        if not combined:
+            combined = f"rng-miner-{int(time.time())}"
 
-            # Add Subject Alternative Names for both hotspot and potential home network IPs
-            cert.add_extensions([
-                crypto.X509Extension(b"subjectAltName", False,
-                                   b"IP:192.168.4.1,IP:192.168.12.1,DNS:rng-miner.local")
-            ])
+        device_hash = hashlib.sha256(combined.encode()).hexdigest()
+        device_id = device_hash[:8].upper()
 
-            cert.set_serial_number(1)
-            cert.gmtime_adj_notBefore(0)
-            cert.gmtime_adj_notAfter(365*24*60*60)  # Valid for 1 year
-            cert.set_issuer(cert.get_subject())
-            cert.set_pubkey(key)
-            cert.sign(key, 'sha256')
+        # Save device ID
+        with open(device_id_file, 'w') as f:
+            f.write(device_id)
 
-            # Write certificate and key to files
-            with open(self.cert_file, 'wb') as f:
-                f.write(crypto.dump_certificate(crypto.FILETYPE_PEM, cert))
+        self.logger.info(f"Generated device ID: {device_id}")
+        return device_id
 
-            with open(self.key_file, 'wb') as f:
-                f.write(crypto.dump_privatekey(crypto.FILETYPE_PEM, key))
+    def load_device_config(self):
+        """Load current device configuration"""
+        try:
+            if self.config_file.exists():
+                with open(self.config_file, 'r') as f:
+                    config = json.load(f)
 
-            # Set proper permissions
-            os.chmod(self.key_file, 0o600)
-            os.chmod(self.cert_file, 0o644)
+                # Merge with mining config if available
+                if self.mining_config_file.exists():
+                    with open(self.mining_config_file, 'r') as f:
+                        mining_config = json.load(f)
+                        config.update(mining_config)
 
-            logging.info("Generated new SSL certificate")
+                # Merge with wifi config if available
+                if self.wifi_config_file.exists():
+                    with open(self.wifi_config_file, 'r') as f:
+                        wifi_config = json.load(f)
+                        config.update(wifi_config)
+
+                return config
+            else:
+                return {}
+        except Exception as e:
+            self.logger.error(f"Failed to load device config: {e}")
+            return {}
+
+    def save_device_config(self, config_data):
+        """Save device configuration"""
+        try:
+            # Save to main config file
+            with open(self.config_file, 'w') as f:
+                json.dump(config_data, f, indent=2)
+
+            # Also update .env file for mining if relevant fields exist
+            if any(key in config_data for key in ['seed_phrase', 'provider_id', 'wallet_json']):
+                self.update_env_file(config_data)
+
+            self.logger.info("Device configuration saved successfully")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to save device config: {e}")
+            return False
+
+    def update_env_file(self, config_data):
+        """Update .env file with mining configuration"""
+        try:
+            env_content = []
+
+            # Add log level
+            log_level = config_data.get('log_console_level', '3')
+            env_content.append(f'LOG_CONSOLE_LEVEL={log_level}')
+
+            # Add seed phrase
+            seed_phrase = config_data.get('seed_phrase', '')
+            if seed_phrase:
+                env_content.append(f'SEED_PHRASE="{seed_phrase}"')
+
+            # Add provider ID
+            provider_id = config_data.get('provider_id', '')
+            if provider_id:
+                env_content.append(f'PROVIDER_ID="{provider_id}"')
+
+            # Add wallet JSON
+            wallet_json = config_data.get('wallet_json', '')
+            if wallet_json:
+                if isinstance(wallet_json, dict):
+                    wallet_json = json.dumps(wallet_json)
+                env_content.append(f"WALLET_JSON='{wallet_json}'")
+
+            # Write to .env file
+            with open(self.env_file, 'w') as f:
+                f.write('\n'.join(env_content))
+
+            self.logger.info("Mining .env file updated")
 
         except Exception as e:
-            logging.error(f"Failed to generate SSL certificate: {e}")
-            raise
+            self.logger.error(f"Failed to update .env file: {e}")
+
+    def get_system_info(self):
+        """Get current system information"""
+        try:
+            # Get current IP
+            result = subprocess.run(['hostname', '-I'], capture_output=True, text=True)
+            ip_address = result.stdout.strip().split()[0] if result.stdout.strip() else "unknown"
+        except:
+            ip_address = "unknown"
+
+        # Check WiFi connection status (simplified)
+        wifi_connected = False
+        wifi_ssid = None
+        try:
+            # Try to get WiFi info
+            result = subprocess.run(['iwgetid', '-r'], capture_output=True, text=True)
+            if result.returncode == 0 and result.stdout.strip():
+                wifi_ssid = result.stdout.strip()
+                wifi_connected = True
+        except:
+            pass
+
+        return {
+            'device_id': self.device_id,
+            'ip_address': ip_address,
+            'wifi_connected': wifi_connected,
+            'wifi_ssid': wifi_ssid or '',
+            'uptime': int(time.time() - self.server_start_time),
+            'timestamp': datetime.now().isoformat()
+        }
 
     def setup_routes(self):
-        """Setup Flask routes with request logging"""
+        """Setup all Flask routes"""
 
         @self.app.before_request
-        def log_request_info():
-            """Log incoming requests with detailed info"""
+        def log_request():
+            """Log all incoming requests"""
             client_ip = request.remote_addr
-            user_agent = request.headers.get('User-Agent', 'Unknown')
-            logging.info(f"🔵 Incoming Request: {request.method} {request.path}")
-            logging.info(f"   Client IP: {client_ip}")
-            logging.info(f"   User Agent: {user_agent}")
-            logging.info(f"   Headers: {dict(request.headers)}")
+            self.logger.info(f"🔵 {request.method} {request.path} from {client_ip}")
 
         @self.app.after_request
-        def log_response_info(response):
-            """Log outgoing responses with detailed info"""
+        def add_cors_headers(response):
+            """Add CORS headers and log responses"""
             client_ip = request.remote_addr
             status_emoji = "✅" if response.status_code < 400 else "❌"
-            logging.info(f"{status_emoji} Response: {response.status_code} for {request.method} {request.path} to {client_ip}")
+            self.logger.info(f"{status_emoji} {response.status_code} for {request.method} {request.path} to {client_ip}")
 
-            # Add CORS headers to allow cross-origin requests from mobile apps
+            # Ensure CORS headers are set
             response.headers['Access-Control-Allow-Origin'] = '*'
             response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
             response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, Accept'
-
             return response
 
-        @self.app.before_first_request
-        def startup_verification():
-            """Run verification checks when first request comes in"""
-            logging.info("🚀 First request received - server is accepting connections!")
-
-        @self.app.errorhandler(Exception)
-        def handle_exception(e):
-            """Log all exceptions for debugging"""
-            logging.error(f"💥 Unhandled exception: {str(e)}")
-            logging.error(f"Request: {request.method} {request.path} from {request.remote_addr}")
-            import traceback
-            logging.error(f"Traceback: {traceback.format_exc()}")
-
-            return jsonify({
-                "success": False,
-                "error_code": "INTERNAL_ERROR",
-                "message": "Internal server error occurred",
-                "timestamp": datetime.now(timezone.utc).isoformat()
-            }), 500
-
+        # Health check endpoint
         @self.app.route('/health', methods=['GET'])
         def health_check():
-            """Health check endpoint"""
+            """Health check endpoint - matches mobile app expectations"""
             try:
                 uptime = int(time.time() - self.server_start_time)
                 response = {
@@ -273,467 +253,329 @@ class DeviceHTTPServer:
                 }
                 return jsonify(response), 200
             except Exception as e:
-                logging.error(f"Health check failed: {e}")
-                error_response = {
+                self.logger.error(f"Health check failed: {e}")
+                return jsonify({
                     "success": False,
                     "error_code": "HEALTH_CHECK_FAILED",
                     "message": "Health check endpoint error",
                     "timestamp": datetime.now(timezone.utc).isoformat()
-                }
-                return jsonify(error_response), 500
+                }), 500
 
+        # Device info endpoint - matches mobile app expectations
         @self.app.route('/device/info', methods=['GET'])
         def device_info():
             """Device information endpoint"""
             try:
-                # Get current IP address
-                try:
-                    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                    s.connect(("8.8.8.8", 80))
-                    ip_address = s.getsockname()[0]
-                    s.close()
-                except:
-                    ip_address = "unknown"
-
-                # Get WiFi/hotspot status
-                wifi_state = "unknown"
-                hotspot_info = {}
-                if self.wifi_manager:
-                    try:
-                        hotspot_status = self.wifi_manager.get_hotspot_status()
-                        if hotspot_status['active']:
-                            wifi_state = "hotspot_active"
-                            hotspot_info = {
-                                "ssid": hotspot_status['ssid'],
-                                "ip_address": hotspot_status['ip_address'],
-                                "connected_clients": len(hotspot_status['connected_clients']),
-                                "dhcp_range": hotspot_status['dhcp_range']
-                            }
-                        else:
-                            wifi_state = "disconnected"
-                    except Exception as e:
-                        logging.error(f"Failed to get WiFi status: {e}")
-
-                # Get basic system info (simplified for now)
-                try:
-                    import psutil
-                    cpu_usage = psutil.cpu_percent(interval=1)
-                    memory = psutil.virtual_memory()
-                    disk = psutil.disk_usage('/')
-                    memory_usage = memory.percent
-                    disk_usage = disk.percent
-                except ImportError:
-                    # Fallback if psutil not available
-                    cpu_usage = 0.0
-                    memory_usage = 0.0
-                    disk_usage = 0.0
+                system_info = self.get_system_info()
+                config_data = self.load_device_config()
 
                 response = {
                     "device_id": self.device_id,
                     "model": "Orange Pi Zero 3",
-                    "wifi_state": wifi_state,
-                    "ip_address": ip_address,
-                    "ssid": hotspot_info.get('ssid', '') if hotspot_info else '',
-                    "mining_status": "not_configured",
-                    "system_info": {
-                        "cpu_usage": cpu_usage,
-                        "memory_usage": memory_usage,
-                        "disk_usage": disk_usage,
-                        "uptime": int(time.time() - self.server_start_time)
-                    },
+                    "wifi_state": "connected" if system_info['wifi_connected'] else "disconnected",
+                    "ip_address": system_info['ip_address'],
+                    "ssid": system_info['wifi_ssid'],
+                    "mining_status": "configured" if config_data.get('seed_phrase') else "not_configured",
+                    "uptime": system_info['uptime'],
+                    "timestamp": system_info['timestamp'],
                     "configuration_status": {
-                        "wifi_configured": False,  # TODO: Check actual WiFi config status
-                        "seed_phrase_set": False,  # TODO: Check if seed phrase is stored
-                        "provider_id_set": False,  # TODO: Check if provider ID is set
-                        "mining_ready": False      # TODO: Check if mining is configured
-                    },
-                    "timestamp": datetime.now(timezone.utc).isoformat()
+                        "wifi_configured": system_info['wifi_connected'],
+                        "seed_phrase_set": bool(config_data.get('seed_phrase')),
+                        "provider_id_set": bool(config_data.get('provider_id')),
+                        "wallet_json_set": bool(config_data.get('wallet_json')),
+                        "mining_ready": bool(config_data.get('seed_phrase') and config_data.get('provider_id'))
+                    }
                 }
-
-                # Add hotspot info if active
-                if hotspot_info:
-                    response["hotspot"] = hotspot_info
-
                 return jsonify(response), 200
             except Exception as e:
-                logging.error(f"Device info failed: {e}")
-                error_response = {
+                self.logger.error(f"Device info failed: {e}")
+                return jsonify({
                     "success": False,
                     "error_code": "DEVICE_INFO_FAILED",
                     "message": "Failed to retrieve device information",
                     "timestamp": datetime.now(timezone.utc).isoformat()
+                }), 500
+
+        # Configuration API endpoints - matches old-bad-way patterns
+        @self.app.route('/api/env-vars', methods=['GET'])
+        def get_env_vars():
+            """Get environment variables - matches old-bad-way API"""
+            try:
+                config_data = self.load_device_config()
+
+                env_vars = {
+                    'SEED_PHRASE': config_data.get('seed_phrase', ''),
+                    'PROVIDER_ID': config_data.get('provider_id', ''),
+                    'WALLET_JSON': config_data.get('wallet_json', ''),
+                    'LOG_CONSOLE_LEVEL': config_data.get('log_console_level', '3'),
+                    'NETWORK_IP': config_data.get('network_ip', ''),
+                    'NETWORK_MODE': config_data.get('network_mode', '')
                 }
-                return jsonify(error_response), 500
 
-        @self.app.route('/wifi/hotspot/status', methods=['GET'])
-        def hotspot_status():
-            """Get detailed hotspot status"""
+                return jsonify(env_vars), 200
+            except Exception as e:
+                self.logger.error(f"Get env vars failed: {e}")
+                return jsonify({'error': str(e)}), 500
+
+        @self.app.route('/api/status', methods=['GET'])
+        def get_status():
+            """Get configuration status - matches old-bad-way API"""
             try:
-                if not self.wifi_manager:
-                    return jsonify({
-                        "success": False,
-                        "error_code": "WIFI_MANAGER_UNAVAILABLE",
-                        "message": "WiFi manager not available"
-                    }), 503
+                config_data = self.load_device_config()
 
-                status = self.wifi_manager.get_hotspot_status()
+                status = {
+                    'seedPhrase': bool(config_data.get('seed_phrase', '').strip()),
+                    'providerId': bool(config_data.get('provider_id', '').strip()),
+                    'walletJson': bool(config_data.get('wallet_json', '').strip())
+                }
+
                 return jsonify(status), 200
-
             except Exception as e:
-                logging.error(f"Hotspot status failed: {e}")
-                return jsonify({
-                    "success": False,
-                    "error_code": "HOTSPOT_STATUS_FAILED",
-                    "message": "Failed to get hotspot status",
-                    "timestamp": datetime.now(timezone.utc).isoformat()
-                }), 500
+                self.logger.error(f"Get status failed: {e}")
+                return jsonify({'error': str(e)}), 500
 
-        @self.app.route('/wifi/hotspot/start', methods=['POST'])
-        def start_hotspot():
-            """Start WiFi hotspot"""
-            try:
-                if not self.wifi_manager:
-                    return jsonify({
-                        "success": False,
-                        "error_code": "WIFI_MANAGER_UNAVAILABLE",
-                        "message": "WiFi manager not available"
-                    }), 503
+        @self.app.route('/api/set-seed-phrase', methods=['POST', 'OPTIONS'])
+        def set_seed_phrase():
+            """Set seed phrase - matches old-bad-way API"""
+            if request.method == 'OPTIONS':
+                return '', 200
 
-                success = self.wifi_manager.start_hotspot()
-                if success:
-                    return jsonify({
-                        "success": True,
-                        "message": "Hotspot started successfully",
-                        "device_id": self.device_id,
-                        "ssid": f"RNG-Miner-{self.device_id}",
-                        "timestamp": datetime.now(timezone.utc).isoformat()
-                    }), 200
-                else:
-                    return jsonify({
-                        "success": False,
-                        "error_code": "HOTSPOT_START_FAILED",
-                        "message": "Failed to start hotspot"
-                    }), 500
-
-            except Exception as e:
-                logging.error(f"Start hotspot failed: {e}")
-                return jsonify({
-                    "success": False,
-                    "error_code": "HOTSPOT_START_ERROR",
-                    "message": "Error starting hotspot",
-                    "timestamp": datetime.now(timezone.utc).isoformat()
-                }), 500
-
-        @self.app.route('/wifi/hotspot/stop', methods=['POST'])
-        def stop_hotspot():
-            """Stop WiFi hotspot"""
-            try:
-                if not self.wifi_manager:
-                    return jsonify({
-                        "success": False,
-                        "error_code": "WIFI_MANAGER_UNAVAILABLE",
-                        "message": "WiFi manager not available"
-                    }), 503
-
-                success = self.wifi_manager.stop_hotspot()
-                if success:
-                    return jsonify({
-                        "success": True,
-                        "message": "Hotspot stopped successfully",
-                        "timestamp": datetime.now(timezone.utc).isoformat()
-                    }), 200
-                else:
-                    return jsonify({
-                        "success": False,
-                        "error_code": "HOTSPOT_STOP_FAILED",
-                        "message": "Failed to stop hotspot"
-                    }), 500
-
-            except Exception as e:
-                logging.error(f"Stop hotspot failed: {e}")
-                return jsonify({
-                    "success": False,
-                    "error_code": "HOTSPOT_STOP_ERROR",
-                    "message": "Error stopping hotspot",
-                    "timestamp": datetime.now(timezone.utc).isoformat()
-                }), 500
-
-        @self.app.route('/device/configure', methods=['POST'])
-        def configure_device():
-            """Configure device with WiFi credentials and mining setup"""
             try:
                 data = request.get_json()
-                if not data:
+                seed_phrase = data.get('seed_phrase', '').strip()
+
+                if not seed_phrase:
+                    return jsonify({'error': 'seed_phrase is required'}), 400
+
+                config_data = self.load_device_config()
+                config_data['seed_phrase'] = seed_phrase
+                config_data['timestamp'] = datetime.now().isoformat()
+
+                if self.save_device_config(config_data):
+                    return jsonify({'success': True, 'seed_phrase_set': True}), 200
+                else:
+                    return jsonify({'error': 'Failed to save seed_phrase'}), 500
+
+            except Exception as e:
+                self.logger.error(f"Set seed phrase failed: {e}")
+                return jsonify({'error': str(e)}), 500
+
+        @self.app.route('/api/set-provider-id', methods=['POST', 'OPTIONS'])
+        def set_provider_id():
+            """Set provider ID - matches old-bad-way API"""
+            if request.method == 'OPTIONS':
+                return '', 200
+
+            try:
+                data = request.get_json()
+                provider_id = data.get('provider_id', '').strip()
+
+                if not provider_id:
+                    return jsonify({'error': 'provider_id is required'}), 400
+
+                config_data = self.load_device_config()
+                config_data['provider_id'] = provider_id
+                config_data['timestamp'] = datetime.now().isoformat()
+
+                if self.save_device_config(config_data):
+                    return jsonify({'success': True, 'provider_id': provider_id}), 200
+                else:
+                    return jsonify({'error': 'Failed to save provider_id'}), 500
+
+            except Exception as e:
+                self.logger.error(f"Set provider ID failed: {e}")
+                return jsonify({'error': str(e)}), 500
+
+        @self.app.route('/api/set-wallet-json', methods=['POST', 'OPTIONS'])
+        def set_wallet_json():
+            """Set wallet JSON - matches old-bad-way API"""
+            if request.method == 'OPTIONS':
+                return '', 200
+
+            try:
+                data = request.get_json()
+                wallet_json = data.get('wallet_json', '').strip()
+
+                if not wallet_json:
+                    return jsonify({'error': 'wallet_json is required'}), 400
+
+                # Validate JSON if it's a string
+                if isinstance(wallet_json, str):
+                    try:
+                        json.loads(wallet_json)
+                    except json.JSONDecodeError:
+                        return jsonify({'error': 'Invalid wallet_json format'}), 400
+                elif isinstance(wallet_json, dict):
+                    wallet_json = json.dumps(wallet_json)
+
+                config_data = self.load_device_config()
+                config_data['wallet_json'] = wallet_json
+                config_data['timestamp'] = datetime.now().isoformat()
+
+                if self.save_device_config(config_data):
+                    return jsonify({'success': True, 'wallet_json_set': True}), 200
+                else:
+                    return jsonify({'error': 'Failed to save wallet_json'}), 500
+
+            except Exception as e:
+                self.logger.error(f"Set wallet JSON failed: {e}")
+                return jsonify({'error': str(e)}), 500
+
+        @self.app.route('/api/set-all-config', methods=['POST', 'OPTIONS'])
+        def set_all_config():
+            """Set all configuration values at once - matches old-bad-way API"""
+            if request.method == 'OPTIONS':
+                return '', 200
+
+            try:
+                data = request.get_json()
+                config_data = self.load_device_config()
+
+                # Update with provided values
+                if 'seed_phrase' in data and data['seed_phrase']:
+                    config_data['seed_phrase'] = data['seed_phrase'].strip()
+
+                if 'provider_id' in data and data['provider_id']:
+                    config_data['provider_id'] = data['provider_id'].strip()
+
+                if 'wallet_json' in data and data['wallet_json']:
+                    wallet_json = data['wallet_json']
+                    if isinstance(wallet_json, str):
+                        try:
+                            json.loads(wallet_json)
+                        except json.JSONDecodeError:
+                            return jsonify({'error': 'Invalid wallet_json format'}), 400
+                    elif isinstance(wallet_json, dict):
+                        wallet_json = json.dumps(wallet_json)
+                    config_data['wallet_json'] = wallet_json
+
+                config_data['timestamp'] = datetime.now().isoformat()
+
+                if self.save_device_config(config_data):
+                    return jsonify({
+                        'success': True,
+                        'seed_phrase_set': bool(config_data.get('seed_phrase')),
+                        'provider_id_set': bool(config_data.get('provider_id')),
+                        'wallet_json_set': bool(config_data.get('wallet_json'))
+                    }), 200
+                else:
+                    return jsonify({'error': 'Failed to save configuration'}), 500
+
+            except Exception as e:
+                self.logger.error(f"Set all config failed: {e}")
+                return jsonify({'error': str(e)}), 500
+
+        # WiFi setup endpoints
+        @self.app.route('/setup/wifi', methods=['POST'])
+        def setup_wifi():
+            """Setup WiFi connection"""
+            try:
+                data = request.get_json()
+
+                if not data or 'ssid' not in data or 'password' not in data:
                     return jsonify({
                         "success": False,
                         "error_code": "INVALID_REQUEST",
-                        "message": "JSON payload required"
+                        "message": "SSID and password are required"
                     }), 400
 
-                # Store configuration data temporarily
-                # In a full implementation, this would validate and apply the configuration
-                wifi_creds = data.get('wifi_credentials', {})
-                seed_phrase = data.get('seed_phrase', '')
-                wallet_jwk = data.get('wallet_jwk', {})
-                provider_id = data.get('provider_id', '')
+                ssid = data['ssid'].strip()
+                password = data['password']
 
-                logging.info(f"Received configuration - WiFi SSID: {wifi_creds.get('ssid', 'N/A')}")
-                logging.info(f"Provider ID: {provider_id}")
-
-                # For now, just acknowledge the configuration
-                # In a real implementation, you would:
-                # 1. Connect to the WiFi network
-                # 2. Store the seed phrase securely
-                # 3. Set up mining with the provider ID
-
-                return jsonify({
-                    "success": True,
-                    "message": "Configuration received and will be applied",
-                    "step_completed": "configuration_received",
-                    "next_step": "wifi_connection",
-                    "timestamp": datetime.now(timezone.utc).isoformat()
-                }), 200
-
-            except Exception as e:
-                logging.error(f"Device configuration failed: {e}")
-                return jsonify({
-                    "success": False,
-                    "error_code": "CONFIGURATION_ERROR",
-                    "message": f"Configuration failed: {str(e)}",
-                    "timestamp": datetime.now(timezone.utc).isoformat()
-                }), 500
-
-        @self.app.route('/device/test-wifi', methods=['POST'])
-        def test_wifi_credentials():
-            """Test WiFi credentials without connecting"""
-            try:
-                data = request.get_json()
-                if not data or 'wifi_credentials' not in data:
+                if not ssid:
                     return jsonify({
-                        "valid": False,
-                        "message": "WiFi credentials required"
+                        "success": False,
+                        "error_code": "INVALID_SSID",
+                        "message": "SSID cannot be empty"
                     }), 400
 
-                wifi_creds = data['wifi_credentials']
-                ssid = wifi_creds.get('ssid', '')
-                password = wifi_creds.get('password', '')
+                self.logger.info(f"Setting up WiFi connection to: {ssid}")
 
-                logging.info(f"Testing WiFi credentials for SSID: {ssid}")
+                # Save WiFi credentials
+                wifi_config = {
+                    "ssid": ssid,
+                    "password": password,
+                    "timestamp": datetime.now().isoformat()
+                }
 
-                # For now, just return that testing is not implemented
-                # In a real implementation, you would attempt to connect temporarily
-                return jsonify({
-                    "valid": True,
-                    "message": "WiFi credential testing not yet implemented - credentials accepted"
-                }), 200
+                with open(self.wifi_config_file, 'w') as f:
+                    json.dump(wifi_config, f)
 
-            except Exception as e:
-                logging.error(f"WiFi credential test failed: {e}")
-                return jsonify({
-                    "valid": False,
-                    "message": f"Test failed: {str(e)}"
-                }), 500
-
-        @self.app.route('/device/reset', methods=['POST'])
-        def reset_configuration():
-            """Reset device configuration to factory defaults"""
-            try:
-                logging.info("Device configuration reset requested")
-
-                # In a real implementation, you would:
-                # 1. Clear stored WiFi credentials
-                # 2. Remove seed phrase and wallet data
-                # 3. Reset mining configuration
-                # 4. Restart hotspot mode
+                # In a real implementation, would connect to WiFi here
+                self.logger.info(f"WiFi configuration saved for {ssid}")
 
                 return jsonify({
                     "success": True,
-                    "message": "Device configuration reset successful",
-                    "timestamp": datetime.now(timezone.utc).isoformat()
+                    "message": "WiFi configuration saved"
                 }), 200
 
             except Exception as e:
-                logging.error(f"Device reset failed: {e}")
+                self.logger.error(f"WiFi setup error: {e}")
                 return jsonify({
                     "success": False,
-                    "error_code": "RESET_ERROR",
-                    "message": f"Reset failed: {str(e)}",
-                    "timestamp": datetime.now(timezone.utc).isoformat()
+                    "error_code": "SETUP_FAILED",
+                    "message": str(e)
                 }), 500
 
-        @self.app.route('/device/logs', methods=['GET'])
-        def get_device_logs():
-            """Get recent device logs"""
-            try:
-                # Read recent log entries
-                log_file = "/opt/device-software/logs/http-server.log"
-                logs = []
-
-                if os.path.exists(log_file):
-                    with open(log_file, 'r') as f:
-                        lines = f.readlines()
-                        # Get last 50 lines
-                        logs = [line.strip() for line in lines[-50:]]
-                else:
-                    logs = ["Log file not found"]
-
-                return jsonify({
-                    "logs": logs,
-                    "success": True,
-                    "timestamp": datetime.now(timezone.utc).isoformat()
-                }), 200
-
-            except Exception as e:
-                logging.error(f"Failed to read logs: {e}")
-                return jsonify({
-                    "logs": [f"Error reading logs: {str(e)}"],
-                    "success": False,
-                    "timestamp": datetime.now(timezone.utc).isoformat()
-                }), 500
-
+        # Error handlers
         @self.app.errorhandler(404)
         def not_found(error):
-            """Handle 404 errors"""
-            response = {
+            return jsonify({
                 "success": False,
                 "error_code": "ENDPOINT_NOT_FOUND",
                 "message": "API endpoint not found",
                 "timestamp": datetime.now(timezone.utc).isoformat()
-            }
-            return jsonify(response), 404
+            }), 404
 
         @self.app.errorhandler(500)
         def internal_error(error):
-            """Handle 500 errors"""
-            response = {
+            return jsonify({
                 "success": False,
                 "error_code": "INTERNAL_SERVER_ERROR",
                 "message": "Internal server error",
                 "timestamp": datetime.now(timezone.utc).isoformat()
-            }
-            return jsonify(response), 500
-
-    def signal_handler(self, signum, frame):
-        """Handle shutdown signals gracefully"""
-        logging.info(f"Received signal {signum}, shutting down gracefully...")
-        self.running = False
-
-    def configure_firewall(self, port):
-        """Configure firewall to allow HTTP traffic"""
-        try:
-            logging.info(f"Configuring firewall for port {port}...")
-
-            # Allow HTTP traffic on the specified port
-            subprocess.run([
-                'sudo', 'iptables', '-I', 'INPUT', '-p', 'tcp',
-                '--dport', str(port), '-j', 'ACCEPT'
-            ], capture_output=True)
-
-            # Allow traffic from hotspot network
-            subprocess.run([
-                'sudo', 'iptables', '-I', 'INPUT', '-s', '192.168.4.0/24',
-                '-j', 'ACCEPT'
-            ], capture_output=True)
-
-            # Also allow general HTTP traffic for mobile clients
-            if port == 80:
-                subprocess.run([
-                    'sudo', 'iptables', '-I', 'INPUT', '-p', 'tcp',
-                    '--dport', '80', '-j', 'ACCEPT'
-                ], capture_output=True)
-
-            logging.info("Firewall configured successfully")
-            return True
-
-        except Exception as e:
-            logging.warning(f"Firewall configuration failed (may not be critical): {e}")
-            return False
-
-    def verify_network_setup(self):
-        """Verify network interface is properly configured"""
-        try:
-            logging.info("Verifying network setup...")
-
-            # Check if wlan0 has the correct IP
-            result = subprocess.run(['ip', 'addr', 'show', 'wlan0'],
-                                  capture_output=True, text=True)
-
-            if '192.168.4.1' in result.stdout:
-                logging.info("✅ wlan0 interface has correct IP (192.168.4.1)")
-            else:
-                logging.warning("⚠️  wlan0 interface may not have correct IP")
-                logging.info(f"wlan0 status: {result.stdout}")
-
-            # Check if we can bind to the interface
-            try:
-                test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                test_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                test_socket.bind(('0.0.0.0', 8081))  # Test port
-                test_socket.close()
-                logging.info("✅ Socket binding test successful")
-            except Exception as e:
-                logging.error(f"❌ Socket binding test failed: {e}")
-
-        except Exception as e:
-            logging.error(f"Network verification failed: {e}")
+            }), 500
 
     def start_server(self):
-        """Start HTTP server (HTTPS can be added later)"""
+        """Start the HTTP server"""
         try:
-            # Save configuration
-            self.save_config()
+            port = 80  # Standard HTTP port for captive portal
 
-            # Verify network setup
-            self.verify_network_setup()
+            self.logger.info(f"🚀 Starting Enhanced Orange Pi HTTP Server on port {port}")
+            self.logger.info(f"Device ID: {self.device_id}")
+            self.logger.info(f"Available endpoints:")
+            self.logger.info(f"  - /health")
+            self.logger.info(f"  - /device/info")
+            self.logger.info(f"  - /api/env-vars")
+            self.logger.info(f"  - /api/status")
+            self.logger.info(f"  - /api/set-seed-phrase")
+            self.logger.info(f"  - /api/set-provider-id")
+            self.logger.info(f"  - /api/set-wallet-json")
+            self.logger.info(f"  - /api/set-all-config")
+            self.logger.info(f"  - /setup/wifi")
 
-            # Configure firewall
-            self.configure_firewall(self.config['http_port'])
-
-            # Setup signal handlers for graceful shutdown
-            signal.signal(signal.SIGTERM, self.signal_handler)
-            signal.signal(signal.SIGINT, self.signal_handler)
-
-            self.running = True
-            port = self.config['http_port']
-
-            logging.info(f"Starting HTTP server on port {port}")
-            logging.info(f"Device ID: {self.device_id}")
-            logging.info(f"Binding to all interfaces (0.0.0.0:{port})")
-            logging.info(f"🌐 Server will be accessible at:")
-            logging.info(f"  - http://192.168.4.1 (standard HTTP port {port})")
-            logging.info(f"  - http://DeviceSetup.local (if mDNS works)")
-            logging.info(f"📡 Available endpoints: /health, /device/info, /device/configure")
-
-            # Start Flask app on port 80 (standard HTTP port for captive portals)
-            logging.info("🚀 Starting Flask HTTP server for captive portal...")
             self.app.run(
-                host='0.0.0.0',  # Bind to all interfaces
+                host='0.0.0.0',
                 port=port,
                 debug=False,
                 threaded=True,
-                use_reloader=False  # Prevent reloader in production
+                use_reloader=False
             )
 
         except Exception as e:
-            logging.error(f"Failed to start server: {e}")
-            import traceback
-            logging.error(f"Full traceback: {traceback.format_exc()}")
+            self.logger.error(f"Failed to start server: {e}")
             sys.exit(1)
-
-    def stop_server(self):
-        """Stop the server gracefully"""
-        logging.info("Stopping HTTP server...")
-        self.running = False
 
 def main():
     """Main entry point"""
-    server = DeviceHTTPServer()
+    server = EnhancedDeviceServer()
     try:
         server.start_server()
     except KeyboardInterrupt:
-        server.stop_server()
+        server.logger.info("Server shutdown requested")
+        sys.exit(0)
     except Exception as e:
-        logging.error(f"Server error: {e}")
+        server.logger.error(f"Server error: {e}")
         sys.exit(1)
 
 if __name__ == "__main__":
