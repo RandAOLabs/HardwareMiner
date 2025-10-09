@@ -6,6 +6,7 @@ Handles WiFi hotspot creation and client WiFi connections.
 """
 
 import os
+import sys
 import time
 import logging
 import subprocess
@@ -381,3 +382,28 @@ no-hosts
                 "state": "ERROR",
                 "error": str(e)
             }
+
+# Command-line interface
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: wifi_manager.py {start_hotspot|stop_hotspot|status}")
+        sys.exit(1)
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s'
+    )
+
+    manager = WiFiManager()
+    command = sys.argv[1]
+
+    if command == "start_hotspot":
+        manager.start_hotspot()
+    elif command == "stop_hotspot":
+        manager.stop_hotspot()
+    elif command == "status":
+        status = manager.get_status()
+        print(json.dumps(status, indent=2))
+    else:
+        print(f"Unknown command: {command}")
+        sys.exit(1)

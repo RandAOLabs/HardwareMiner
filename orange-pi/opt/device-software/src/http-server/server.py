@@ -501,12 +501,25 @@ class EnhancedDeviceServer:
                 with open(self.wifi_config_file, 'w') as f:
                     json.dump(wifi_config, f)
 
-                # In a real implementation, would connect to WiFi here
-                self.logger.info(f"WiFi configuration saved for {ssid}")
+                # Trigger WiFi connection in background thread
+                def connect_wifi_background():
+                    try:
+                        self.logger.info(f"Background: Initiating WiFi connection to {ssid}")
+                        subprocess.run([
+                            'python3',
+                            '/opt/device-software/scripts/wifi_connect.py',
+                            ssid,
+                            password
+                        ], timeout=60)
+                    except Exception as e:
+                        self.logger.error(f"Background WiFi connection failed: {e}")
+
+                thread = threading.Thread(target=connect_wifi_background, daemon=True)
+                thread.start()
 
                 return jsonify({
                     "success": True,
-                    "message": "WiFi configuration saved"
+                    "message": "WiFi connection initiated"
                 }), 200
 
             except Exception as e:
