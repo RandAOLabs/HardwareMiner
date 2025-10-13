@@ -61,6 +61,21 @@ if [[ ! -f "$DEVICE_ID_FILE" ]]; then
     echo "$DEVICE_ID" > "$DEVICE_ID_FILE"
 
     log "✅ Device ID generated: $DEVICE_ID"
+
+    # Set hostname to match AP name (RNG-Miner-XXXXXXXX)
+    NEW_HOSTNAME="RNG-Miner-${DEVICE_ID}"
+    log "🏷️  Setting hostname to: $NEW_HOSTNAME"
+
+    # Update hostname in multiple places
+    echo "$NEW_HOSTNAME" > /etc/hostname
+    hostnamectl set-hostname "$NEW_HOSTNAME" 2>/dev/null || true
+
+    # Update /etc/hosts to include new hostname
+    sed -i "s/127.0.1.1.*/127.0.1.1\t$NEW_HOSTNAME/g" /etc/hosts
+    # Add if not exists
+    grep -q "127.0.1.1" /etc/hosts || echo "127.0.1.1	$NEW_HOSTNAME" >> /etc/hosts
+
+    log "✅ Hostname set to $NEW_HOSTNAME"
 else
     DEVICE_ID=$(cat "$DEVICE_ID_FILE")
     log "✅ Device ID exists: $DEVICE_ID"

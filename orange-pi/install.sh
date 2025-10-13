@@ -157,6 +157,13 @@ else
     error "Server script not found in $SCRIPT_DIR or $SCRIPT_DIR/opt/device-software"
 fi
 
+# Copy wifi_manager.py to /opt/device-software for easy access
+if [[ -f "$SCRIPT_DIR/wifi_manager.py" ]]; then
+    cp "$SCRIPT_DIR/wifi_manager.py" /opt/device-software/
+    chmod +x /opt/device-software/wifi_manager.py
+    log "✅ WiFi manager copied to /opt/device-software"
+fi
+
 # Verify server file exists
 if [[ ! -f "/opt/device-software/src/http-server/server.py" ]]; then
     error "CRITICAL: Server script not found at /opt/device-software/src/http-server/server.py after copy"
@@ -238,6 +245,21 @@ else
     chown -R orangepi:orangepi "$DEVICE_ID_DIR" 2>/dev/null || chown -R pi:pi "$DEVICE_ID_DIR" 2>/dev/null || true
 
     log "Device ID: $DEVICE_ID"
+
+    # Set hostname to match AP name (RNG-Miner-XXXXXXXX)
+    NEW_HOSTNAME="RNG-Miner-${DEVICE_ID}"
+    log "🏷️  Setting hostname to: $NEW_HOSTNAME"
+
+    # Update hostname in multiple places
+    echo "$NEW_HOSTNAME" > /etc/hostname
+    hostnamectl set-hostname "$NEW_HOSTNAME" 2>/dev/null || true
+
+    # Update /etc/hosts to include new hostname
+    sed -i "s/127.0.1.1.*/127.0.1.1\t$NEW_HOSTNAME/g" /etc/hosts
+    # Add if not exists
+    grep -q "127.0.1.1" /etc/hosts || echo "127.0.1.1	$NEW_HOSTNAME" >> /etc/hosts
+
+    log "✅ Hostname set to $NEW_HOSTNAME"
 fi
 
 # Enable the service

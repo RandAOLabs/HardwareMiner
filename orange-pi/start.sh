@@ -46,32 +46,81 @@ if command -v nmcli >/dev/null 2>&1; then
     fi
 fi
 
+# If not connected, check if we have saved credentials and try to connect
+if [[ "$WIFI_CONNECTED" == "false" ]]; then
+    WIFI_CONFIG_FILE="/opt/device-software/config/wifi_config.json"
+
+    if [[ -f "$WIFI_CONFIG_FILE" ]]; then
+        log "🔑 Found saved WiFi credentials, attempting to connect..."
+
+        # Extract SSID and password from config
+        if command -v python3 >/dev/null 2>&1; then
+            SAVED_SSID=$(python3 -c "import json; print(json.load(open('$WIFI_CONFIG_FILE')).get('ssid', ''))" 2>/dev/null || echo "")
+            SAVED_PASSWORD=$(python3 -c "import json; print(json.load(open('$WIFI_CONFIG_FILE')).get('password', ''))" 2>/dev/null || echo "")
+
+            if [[ -n "$SAVED_SSID" ]]; then
+                log "📡 Attempting to connect to saved network: $SAVED_SSID"
+
+                # Ensure WiFi radio is on
+                nmcli radio wifi on 2>/dev/null || true
+                sleep 2
+
+                # Attempt connection with timeout
+                if timeout 30s nmcli device wifi connect "$SAVED_SSID" password "$SAVED_PASSWORD" 2>/dev/null; then
+                    log "✅ Successfully connected to WiFi: $SAVED_SSID"
+                    WIFI_CONNECTED=true
+
+                    # Wait for connection to stabilize
+                    sleep 5
+
+                    # Verify connection
+                    if nmcli -t -f ACTIVE,SSID dev wifi | grep -q '^yes'; then
+                        log "✅ WiFi connection verified"
+                    else
+                        log "⚠️ Connection verification failed, will start AP"
+                        WIFI_CONNECTED=false
+                    fi
+                else
+                    log "⚠️ Failed to connect to saved WiFi: $SAVED_SSID"
+                    log "📡 Will start hotspot mode instead"
+                fi
+            fi
+        fi
+    else
+        log "📡 No saved WiFi credentials found"
+    fi
+fi
+
 # Start WiFi hotspot only if not connected to WiFi
 if [[ "$WIFI_CONNECTED" == "false" ]]; then
-    log "📡 No WiFi connection detected, starting hotspot..."
+    log "📡 Starting hotspot mode..."
+
+    # Try to find wifi_manager.py in multiple locations
+    WIFI_MANAGER_SCRIPT=""
+    for path in "$INSTALL_DIR/wifi_manager.py" "/opt/device-software/wifi_manager.py" "/opt/device-software/src/wifi-manager/wifi_manager.py"; do
+        if [[ -f "$path" ]]; then
+            WIFI_MANAGER_SCRIPT="$path"
+            log "Found wifi_manager at: $path"
+            break
+        fi
+    done
 
     # Try Python WiFi manager first
-    if python3 -c "
-import sys
-sys.path.insert(0, '$INSTALL_DIR')
-from wifi_manager import WiFiManager
-wifi_manager = WiFiManager()
-try:
-    wifi_manager.start_hotspot()
-    print('SUCCESS: WiFi hotspot started via Python WiFi manager')
-    exit(0)
-except Exception as e:
-    print(f'FAILED: WiFi manager error: {e}')
-    exit(1)
-"; then
-        log "✅ WiFi hotspot started successfully via Python manager"
+    if [[ -n "$WIFI_MANAGER_SCRIPT" ]]; then
+        log "Attempting to start hotspot via Python WiFi manager..."
+        if python3 "$WIFI_MANAGER_SCRIPT" start_hotspot 2>&1 | tee -a "$LOG_FILE"; then
+            log "✅ WiFi hotspot started successfully via Python manager"
+        else
+            log "⚠️ Python WiFi manager failed (exit code: $?)"
+        fi
     else
-        log "⚠️ Python WiFi manager failed, trying direct AP script..."
+        log "⚠️ WiFi manager script not found, trying direct AP script..."
 
         # Fallback to direct AP script
         if [[ -f "$INSTALL_DIR/start_ap_direct.sh" ]]; then
             chmod +x "$INSTALL_DIR/start_ap_direct.sh"
 
+            log "Starting AP via direct script..."
             # Start AP in background
             "$INSTALL_DIR/start_ap_direct.sh" &
             AP_PID=$!
@@ -87,7 +136,7 @@ except Exception as e:
                 log "❌ Direct AP script failed to start"
             fi
         else
-            log "❌ Direct AP script not found"
+            log "❌ Direct AP script not found at: $INSTALL_DIR/start_ap_direct.sh"
         fi
     fi
 else
