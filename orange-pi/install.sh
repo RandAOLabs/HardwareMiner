@@ -134,6 +134,30 @@ else
     log "Docker Compose already available"
 fi
 
+# Clone Randomness-Provider repository
+log "📥 Cloning Randomness-Provider repository..."
+PROVIDER_REPO_DIR="/opt/mining/Randomness-Provider"
+mkdir -p /opt/mining
+
+if [[ ! -d "$PROVIDER_REPO_DIR" ]]; then
+    git clone https://github.com/RandAOLabs/Randomness-Provider.git "$PROVIDER_REPO_DIR"
+    log "✅ Randomness-Provider cloned successfully"
+else
+    log "ℹ️  Randomness-Provider already exists, updating..."
+    cd "$PROVIDER_REPO_DIR" && git pull origin main || {
+        warn "Failed to update repository, using existing version"
+    }
+fi
+
+# Set proper permissions for provider repo
+chown -R orangepi:orangepi "$PROVIDER_REPO_DIR" 2>/dev/null || chown -R pi:pi "$PROVIDER_REPO_DIR" 2>/dev/null || true
+
+# Create .env file from example if it doesn't exist
+if [[ -f "$PROVIDER_REPO_DIR/docker-compose/.env.example" ]] && [[ ! -f "$PROVIDER_REPO_DIR/docker-compose/.env" ]]; then
+    cp "$PROVIDER_REPO_DIR/docker-compose/.env.example" "$PROVIDER_REPO_DIR/docker-compose/.env"
+    log "✅ Created .env file from example"
+fi
+
 # Copy all files to installation directory
 log "📋 Copying RNG Miner files..."
 cp -r "$SCRIPT_DIR"/* "$INSTALL_DIR/"
@@ -199,8 +223,8 @@ chown -R orangepi:orangepi /var/lib/rng-miner 2>/dev/null || chown -R pi:pi /var
 chmod +x "$INSTALL_DIR"/*.sh
 chmod +x "$INSTALL_DIR"/scripts/*.sh 2>/dev/null || true
 
-# Install systemd service
-log "⚡ Installing systemd service..."
+# Install systemd service for RNG Miner
+log "⚡ Installing RNG Miner systemd service..."
 cat > /etc/systemd/system/rng-miner.service << EOF
 [Unit]
 Description=RNG Miner HTTP Server and WiFi Hotspot
@@ -220,6 +244,35 @@ RestartSec=10
 [Install]
 WantedBy=multi-user.target
 EOF
+
+# Install systemd service for Randomness Provider
+log "⚡ Installing Randomness Provider systemd service..."
+cat > /etc/systemd/system/randomness-provider.service << 'EOF'
+[Unit]
+Description=Randomness Provider Service
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/mining/Randomness-Provider/docker-compose
+ExecStartPre=/bin/sleep 5
+ExecStart=/usr/bin/docker compose up -d
+ExecStop=/usr/bin/docker compose down
+ExecReload=/usr/bin/docker compose restart
+TimeoutStartSec=300
+TimeoutStopSec=120
+User=root
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+log "✅ Randomness Provider service installed (disabled by default - controlled via API)"
 
 # Generate device configuration
 log "🔧 Generating device configuration..."

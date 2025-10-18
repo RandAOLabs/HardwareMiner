@@ -508,10 +508,146 @@ Available endpoints:
   - /api/set-wallet-json
   - /api/set-all-config
   - /setup/wifi
+  - /api/provider/start
+  - /api/provider/stop
+  - /api/provider/status
+  - /api/provider/restart
 ```
+
+---
+
+## Provider Management Endpoints
+
+### `POST /api/provider/start`
+
+Start the Randomness Provider service (Docker containers).
+
+**Requirements:**
+- Seed phrase must be configured
+- Provider ID must be configured
+- Wallet JSON must be configured
+
+**Response (Success):**
+```json
+{
+  "success": true,
+  "message": "Provider service started successfully",
+  "running": true,
+  "enabled_on_boot": true
+}
+```
+
+**Response (Error - Missing Config):**
+```json
+{
+  "success": false,
+  "error": "Seed phrase not configured",
+  "error_code": "MISSING_CONFIG"
+}
+```
+
+**Status Codes:**
+- `200`: Success
+- `400`: Missing required configuration
+- `500`: Failed to start service
+
+**Behavior:**
+- Updates `.env` file with current configuration
+- Starts the `randomness-provider` systemd service
+- Enables service to start on boot
+- Returns status confirmation
+
+---
+
+### `POST /api/provider/stop`
+
+Stop the Randomness Provider service.
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Provider service stopped successfully",
+  "running": false,
+  "enabled_on_boot": false
+}
+```
+
+**Status Codes:**
+- `200`: Success
+- `500`: Failed to stop service
+
+**Behavior:**
+- Stops the `randomness-provider` systemd service
+- Disables service from starting on boot
+- Shuts down all Docker containers gracefully
+
+---
+
+### `GET /api/provider/status`
+
+Get current status of the Randomness Provider service.
+
+**Response:**
+```json
+{
+  "running": true,
+  "enabled_on_boot": true,
+  "config_complete": true,
+  "containers": [
+    {
+      "name": "orchestrator",
+      "state": "running",
+      "status": "Up 2 hours"
+    },
+    {
+      "name": "puzzle-generator",
+      "state": "running",
+      "status": "Up 2 hours"
+    }
+  ],
+  "timestamp": "2025-10-13T12:34:56.789Z"
+}
+```
+
+**Fields:**
+- `running`: Boolean indicating if service is currently active
+- `enabled_on_boot`: Boolean indicating if service will start on system boot
+- `config_complete`: Boolean indicating if all required config is present
+- `containers`: Array of Docker container statuses (only when running)
+- `timestamp`: ISO 8601 timestamp
+
+**Status Codes:**
+- `200`: Success
+- `500`: Failed to check status
+
+---
+
+### `POST /api/provider/restart`
+
+Restart the Randomness Provider service.
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Provider service restarted successfully",
+  "running": true
+}
+```
+
+**Status Codes:**
+- `200`: Success
+- `500`: Failed to restart service
+
+**Behavior:**
+- Updates `.env` file with current configuration
+- Restarts the `randomness-provider` systemd service
+- Docker containers are restarted with new configuration
 
 ---
 
 ## Version History
 
+- **v2.0** (2025-10-13): Added provider management endpoints for controlling the Randomness Provider service
 - **v1.0** (2025-09-30): Initial API documentation for enhanced server

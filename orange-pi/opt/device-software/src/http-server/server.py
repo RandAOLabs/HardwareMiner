@@ -153,7 +153,7 @@ class EnhancedDeviceServer:
             return False
 
     def update_env_file(self, config_data):
-        """Update .env file with mining configuration"""
+        """Update .env file with complete provider configuration"""
         try:
             env_content = []
 
@@ -171,18 +171,28 @@ class EnhancedDeviceServer:
             if provider_id:
                 env_content.append(f'PROVIDER_ID="{provider_id}"')
 
-            # Add wallet JSON
+            # Add wallet JSON (maps to local_wallet_json for Randomness-Provider)
             wallet_json = config_data.get('wallet_json', '')
             if wallet_json:
                 if isinstance(wallet_json, dict):
                     wallet_json = json.dumps(wallet_json)
                 env_content.append(f"WALLET_JSON='{wallet_json}'")
+                env_content.append(f"local_wallet_json='{wallet_json}'")
+
+            # Database credentials (with defaults)
+            db_user = config_data.get('db_user', 'postgres')
+            db_password = config_data.get('db_password', 'password123')
+            db_name = config_data.get('db_name', 'randomness_provider')
+
+            env_content.append(f'local_db_user={db_user}')
+            env_content.append(f'local_db_password={db_password}')
+            env_content.append(f'db_name={db_name}')
 
             # Write to .env file
             with open(self.env_file, 'w') as f:
                 f.write('\n'.join(env_content))
 
-            self.logger.info("Mining .env file updated")
+            self.logger.info("Provider .env file updated with all configuration")
 
         except Exception as e:
             self.logger.error(f"Failed to update .env file: {e}")
@@ -388,28 +398,30 @@ class EnhancedDeviceServer:
 
         @self.app.route('/api/set-wallet-json', methods=['POST', 'OPTIONS'])
         def set_wallet_json():
-            """Set wallet JSON - matches old-bad-way API"""
+            """Set wallet JSON - expects JWK object from mobile app"""
             if request.method == 'OPTIONS':
                 return '', 200
 
             try:
                 data = request.get_json()
-                wallet_json = data.get('wallet_json', '').strip()
+                wallet_json = data.get('wallet_json')
 
                 if not wallet_json:
                     return jsonify({'error': 'wallet_json is required'}), 400
 
-                # Validate JSON if it's a string
-                if isinstance(wallet_json, str):
-                    try:
-                        json.loads(wallet_json)
-                    except json.JSONDecodeError:
-                        return jsonify({'error': 'Invalid wallet_json format'}), 400
-                elif isinstance(wallet_json, dict):
-                    wallet_json = json.dumps(wallet_json)
+                # Expect a dict (JWK object) from the mobile app
+                if not isinstance(wallet_json, dict):
+                    return jsonify({'error': 'wallet_json must be a JWK object'}), 400
+
+                # Validate that it has required JWK fields
+                if 'n' not in wallet_json or 'e' not in wallet_json:
+                    return jsonify({'error': 'Invalid JWK format - missing required fields'}), 400
+
+                # Convert to JSON string for storage in .env file
+                wallet_json_str = json.dumps(wallet_json)
 
                 config_data = self.load_device_config()
-                config_data['wallet_json'] = wallet_json
+                config_data['wallet_json'] = wallet_json_str
                 config_data['timestamp'] = datetime.now().isoformat()
 
                 if self.save_device_config(config_data):
@@ -530,6 +542,344 @@ class EnhancedDeviceServer:
                     "message": str(e)
                 }), 500
 
+        # Provider Management Endpoints
+        @self.app.route('/api/provider/start', methods=['POST', 'OPTIONS'])
+        def start_provider():
+            """Start the Randomness Provider service"""
+            if request.method == 'OPTIONS':
+                return '', 200
+
+            try:
+                self.logger.info("🚀 Starting Randomness Provider service...")
+
+                # Ensure .env file is up to date with current config
+                config_data = self.load_device_config()
+
+                # Validate required configuration
+                if not config_data.get('seed_phrase'):
+                    return jsonify({
+                        'success': False,
+                        'error': 'Seed phrase not configured',
+                        'error_code': 'MISSING_CONFIG'
+                    }), 400
+
+                if not config_data.get('provider_id'):
+                    return jsonify({
+                        'success': False,
+                        'error': 'Provider ID not configured',
+                        'error_code': 'MISSING_CONFIG'
+                    }), 400
+
+                if not config_data.get('wallet_json'):
+                    return jsonify({
+                        'success': False,
+                        'error': 'Wallet JSON not configured',
+                        'error_code': 'MISSING_CONFIG'
+                    }), 400
+
+                # Update .env file with latest config
+                self.update_env_file(config_data)
+
+                # Start provider using systemd service (non-blocking)
+                result = subprocess.run(
+                    ['systemctl', 'start', 'randomness-provider'],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+
+                if result.returncode != 0:
+                    self.logger.error(f"Failed to start provider: {result.stderr}")
+                    return jsonify({
+                        'success': False,
+                        'error': 'Failed to start provider service',
+                        'details': result.stderr
+                    }), 500
+
+                # Enable service to start on boot
+                subprocess.run(
+                    ['systemctl', 'enable', 'randomness-provider'],
+                    capture_output=True,
+                    timeout=5
+                )
+
+                self.logger.info("✅ Provider start command sent successfully")
+
+                # Return immediately - client will poll status
+                return jsonify({
+                    'success': True,
+                    'message': 'Provider start command sent successfully',
+                    'state': 'starting'
+                }), 200
+
+            except subprocess.TimeoutExpired:
+                self.logger.error("Provider start command timed out")
+                return jsonify({
+                    'success': False,
+                    'error': 'Start command timed out'
+                }), 500
+            except Exception as e:
+                self.logger.error(f"Failed to start provider: {e}")
+                return jsonify({
+                    'success': False,
+                    'error': str(e)
+                }), 500
+
+        @self.app.route('/api/provider/stop', methods=['POST', 'OPTIONS'])
+        def stop_provider():
+            """Stop the Randomness Provider service"""
+            if request.method == 'OPTIONS':
+                return '', 200
+
+            try:
+                self.logger.info("🛑 Stopping Randomness Provider service...")
+
+                # Stop the service (non-blocking)
+                result = subprocess.run(
+                    ['systemctl', 'stop', 'randomness-provider'],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+
+                if result.returncode != 0:
+                    self.logger.error(f"Failed to stop provider: {result.stderr}")
+                    return jsonify({
+                        'success': False,
+                        'error': 'Failed to stop provider service',
+                        'details': result.stderr
+                    }), 500
+
+                # Disable service from starting on boot
+                subprocess.run(
+                    ['systemctl', 'disable', 'randomness-provider'],
+                    capture_output=True,
+                    timeout=5
+                )
+
+                self.logger.info("✅ Provider stop command sent successfully")
+
+                # Return immediately - client will poll status
+                return jsonify({
+                    'success': True,
+                    'message': 'Provider stop command sent successfully',
+                    'state': 'stopping'
+                }), 200
+
+            except subprocess.TimeoutExpired:
+                self.logger.error("Provider stop command timed out")
+                return jsonify({
+                    'success': False,
+                    'error': 'Stop command timed out'
+                }), 500
+            except Exception as e:
+                self.logger.error(f"Failed to stop provider: {e}")
+                return jsonify({
+                    'success': False,
+                    'error': str(e)
+                }), 500
+
+        @self.app.route('/api/provider/status', methods=['GET'])
+        def get_provider_status():
+            """Get Randomness Provider service status with detailed progress"""
+            try:
+                # Check systemd service state
+                active_result = subprocess.run(
+                    ['systemctl', 'is-active', 'randomness-provider'],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                systemd_active = active_result.stdout.strip()
+
+                # Check if enabled on boot
+                enabled_result = subprocess.run(
+                    ['systemctl', 'is-enabled', 'randomness-provider'],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                is_enabled = enabled_result.stdout.strip() == 'enabled'
+
+                # Check systemd service sub-state for more details
+                substate_result = subprocess.run(
+                    ['systemctl', 'show', 'randomness-provider', '--property=SubState'],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                substate = substate_result.stdout.strip().replace('SubState=', '')
+
+                # Determine overall state and progress
+                state = 'stopped'
+                progress = {'step': 'idle', 'details': 'Service is not running'}
+                containers = []
+                failed = False
+
+                # Check configuration
+                config_data = self.load_device_config()
+                config_complete = bool(
+                    config_data.get('seed_phrase') and
+                    config_data.get('provider_id') and
+                    config_data.get('wallet_json')
+                )
+
+                # Check for failed state
+                if systemd_active == 'failed' or substate == 'failed':
+                    state = 'failed'
+                    failed = True
+                    progress = {'step': 'failed', 'details': 'Service failed to start. Check logs with: journalctl -u randomness-provider'}
+
+                elif systemd_active == 'activating':
+                    state = 'starting'
+                    if substate == 'start-pre':
+                        progress = {'step': 'initializing', 'details': 'Preparing to start service'}
+                    elif substate == 'start':
+                        progress = {'step': 'starting_containers', 'details': 'Docker Compose is starting containers'}
+                    else:
+                        progress = {'step': 'starting', 'details': 'Service is starting up'}
+
+                elif systemd_active == 'deactivating':
+                    state = 'stopping'
+                    progress = {'step': 'stopping', 'details': 'Stopping containers gracefully'}
+
+                elif systemd_active == 'active':
+                    # Service is active, check Docker containers for detailed state
+                    try:
+                        ps_result = subprocess.run(
+                            ['docker', 'compose', 'ps', '--format', 'json'],
+                            cwd='/opt/mining/Randomness-Provider/docker-compose',
+                            capture_output=True,
+                            text=True,
+                            timeout=10
+                        )
+
+                        if ps_result.returncode == 0 and ps_result.stdout.strip():
+                            running_containers = 0
+                            total_containers = 0
+
+                            for line in ps_result.stdout.strip().split('\n'):
+                                try:
+                                    container_info = json.loads(line)
+                                    total_containers += 1
+                                    container_state = container_info.get('State', 'unknown')
+
+                                    containers.append({
+                                        'name': container_info.get('Service', 'unknown'),
+                                        'state': container_state,
+                                        'status': container_info.get('Status', 'unknown')
+                                    })
+
+                                    if container_state == 'running':
+                                        running_containers += 1
+                                except json.JSONDecodeError:
+                                    continue
+
+                            # Determine state based on container status
+                            if total_containers == 0:
+                                state = 'starting'
+                                progress = {'step': 'pulling_images', 'details': 'Downloading Docker images (this may take a few minutes)'}
+                            elif running_containers == 0:
+                                state = 'starting'
+                                progress = {'step': 'initializing', 'details': f'Containers starting (0/{total_containers} ready)'}
+                            elif running_containers < total_containers:
+                                state = 'starting'
+                                progress = {'step': 'initializing', 'details': f'Containers starting ({running_containers}/{total_containers} ready)'}
+                            else:
+                                state = 'running'
+                                progress = {'step': 'running', 'details': f'All {total_containers} containers running successfully'}
+                        else:
+                            # Docker compose ps failed, might be pulling images
+                            state = 'starting'
+                            progress = {'step': 'pulling_images', 'details': 'Preparing Docker environment'}
+
+                    except Exception as e:
+                        self.logger.warning(f"Failed to get container details: {e}")
+                        state = 'starting'
+                        progress = {'step': 'initializing', 'details': 'Checking container status...'}
+
+                else:
+                    # Service is inactive/stopped
+                    state = 'stopped'
+                    progress = {'step': 'idle', 'details': 'Service is stopped'}
+
+                response = {
+                    'state': state,
+                    'progress': progress,
+                    'enabled_on_boot': is_enabled,
+                    'config_complete': config_complete,
+                    'containers': containers,
+                    'failed': failed,
+                    'systemd_state': systemd_active,
+                    'systemd_substate': substate,
+                    'timestamp': datetime.now().isoformat()
+                }
+
+                return jsonify(response), 200
+
+            except subprocess.TimeoutExpired:
+                return jsonify({
+                    'success': False,
+                    'error': 'Status check timed out'
+                }), 500
+            except Exception as e:
+                self.logger.error(f"Failed to get provider status: {e}")
+                return jsonify({
+                    'success': False,
+                    'error': str(e)
+                }), 500
+
+        @self.app.route('/api/provider/restart', methods=['POST', 'OPTIONS'])
+        def restart_provider():
+            """Restart the Randomness Provider service"""
+            if request.method == 'OPTIONS':
+                return '', 200
+
+            try:
+                self.logger.info("🔄 Restarting Randomness Provider service...")
+
+                # Update .env file with latest config
+                config_data = self.load_device_config()
+                self.update_env_file(config_data)
+
+                # Restart the service (non-blocking)
+                result = subprocess.run(
+                    ['systemctl', 'restart', 'randomness-provider'],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+
+                if result.returncode != 0:
+                    self.logger.error(f"Failed to restart provider: {result.stderr}")
+                    return jsonify({
+                        'success': False,
+                        'error': 'Failed to restart provider service',
+                        'details': result.stderr
+                    }), 500
+
+                self.logger.info("✅ Provider restart command sent successfully")
+
+                # Return immediately - client will poll status
+                return jsonify({
+                    'success': True,
+                    'message': 'Provider restart command sent successfully',
+                    'state': 'restarting'
+                }), 200
+
+            except subprocess.TimeoutExpired:
+                self.logger.error("Provider restart command timed out")
+                return jsonify({
+                    'success': False,
+                    'error': 'Restart command timed out'
+                }), 500
+            except Exception as e:
+                self.logger.error(f"Failed to restart provider: {e}")
+                return jsonify({
+                    'success': False,
+                    'error': str(e)
+                }), 500
+
         # Error handlers
         @self.app.errorhandler(404)
         def not_found(error):
@@ -566,6 +916,10 @@ class EnhancedDeviceServer:
             self.logger.info(f"  - /api/set-wallet-json")
             self.logger.info(f"  - /api/set-all-config")
             self.logger.info(f"  - /setup/wifi")
+            self.logger.info(f"  - /api/provider/start")
+            self.logger.info(f"  - /api/provider/stop")
+            self.logger.info(f"  - /api/provider/status")
+            self.logger.info(f"  - /api/provider/restart")
 
             self.app.run(
                 host='0.0.0.0',
