@@ -247,21 +247,11 @@ def start_ap_mode():
     logger.info("🔄 FALLBACK: Restarting AP mode...")
 
     try:
-        # Try the wifi_manager in multiple locations
-        wifi_manager_paths = [
-            "/opt/device-software/wifi_manager.py",
-            "/root/wifi_manager.py",
-            "/opt/device-software/src/wifi-manager/wifi_manager.py"
-        ]
+        # WiFi manager is at the organized location
+        wifi_manager = "/opt/device-software/src/wifi-manager/wifi_manager.py"
 
-        wifi_manager = None
-        for path in wifi_manager_paths:
-            if Path(path).exists():
-                wifi_manager = path
-                break
-
-        if not wifi_manager:
-            logger.error("Could not find wifi_manager.py")
+        if not Path(wifi_manager).exists():
+            logger.error(f"Could not find wifi_manager.py at {wifi_manager}")
             return False
 
         logger.info(f"Using wifi_manager at: {wifi_manager}")

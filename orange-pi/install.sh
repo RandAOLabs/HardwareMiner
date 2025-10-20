@@ -181,12 +181,8 @@ else
     error "Server script not found in $SCRIPT_DIR or $SCRIPT_DIR/opt/device-software"
 fi
 
-# Copy wifi_manager.py to /opt/device-software for easy access
-if [[ -f "$SCRIPT_DIR/wifi_manager.py" ]]; then
-    cp "$SCRIPT_DIR/wifi_manager.py" /opt/device-software/
-    chmod +x /opt/device-software/wifi_manager.py
-    log "✅ WiFi manager copied to /opt/device-software"
-fi
+# WiFi manager is now part of the repo structure at opt/device-software/src/wifi-manager/
+# No need to copy - it will be copied with the rest of the repo structure
 
 # Verify server file exists
 if [[ ! -f "/opt/device-software/src/http-server/server.py" ]]; then
@@ -276,8 +272,8 @@ log "✅ Randomness Provider service installed (disabled by default - controlled
 
 # Generate device configuration
 log "🔧 Generating device configuration..."
-if [[ -f "$INSTALL_DIR/generate-config.sh" ]]; then
-    "$INSTALL_DIR/generate-config.sh"
+if [[ -f "/opt/device-software/scripts/setup/generate-config.sh" ]]; then
+    "/opt/device-software/scripts/setup/generate-config.sh"
 else
     # Generate device ID directly if script missing
     log "🆔 Generating device ID..."

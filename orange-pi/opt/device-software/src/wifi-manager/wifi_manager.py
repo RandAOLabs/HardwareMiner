@@ -1,538 +1,409 @@
 #!/usr/bin/env python3
 """
-Orange Pi WiFi Manager
-Handles WiFi hotspot creation, DHCP configuration, and network interface management
+WiFi Manager for RNG Miner
+
+Handles WiFi hotspot creation and client WiFi connections.
 """
 
 import os
 import sys
-import json
 import time
-import signal
 import logging
-import hashlib
 import subprocess
-import socket
-import threading
-from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+import json
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 class WiFiManager:
-    """Manages WiFi hotspot creation and lifecycle on Orange Pi"""
-
-    def __init__(self, config_path="/opt/device-software/config/device-config.json"):
-        self.config_path = config_path
-        self.config = self.load_config()
-        self.device_id = self.get_or_generate_device_id()
+    def __init__(self):
+        self.device_id_file = Path("/var/lib/rng-miner/device_id")
         self.hotspot_active = False
-        self.setup_logging()
 
-        # File paths
-        self.hostapd_config_path = "/opt/device-software/config/hostapd.conf"
-        self.dnsmasq_config_path = "/opt/device-software/config/dnsmasq.conf"
-        self.hostapd_pid_file = "/opt/device-software/config/hostapd.pid"
-        self.dnsmasq_pid_file = "/opt/device-software/config/dnsmasq.pid"
-
-        # Network configuration
-        self.hotspot_interface = "wlan0"
-        self.hotspot_ip = "192.168.4.1"
-        self.hotspot_subnet = "192.168.4.0/24"
-        self.dhcp_range_start = "192.168.4.100"
-        self.dhcp_range_end = "192.168.4.200"
-        self.hotspot_password = "RNG-Miner-Password-123"
-
-    def load_config(self) -> Dict:
-        """Load device configuration from JSON file"""
-        default_config = {
-            "device_id": "",
-            "hotspot_ssid": "",
-            "hotspot_password": "RNG-Miner-Password-123",
-            "http_port": 8080,
-            "dhcp_range": "192.168.4.0/24",
-            "wifi_state_timeout": 30,
-            "connection_retry_limit": 3
-        }
-
-        try:
-            if os.path.exists(self.config_path):
-                with open(self.config_path, 'r') as f:
-                    config = json.load(f)
-                    default_config.update(config)
-            return default_config
-        except Exception as e:
-            logging.error(f"Failed to load config: {e}")
-            return default_config
-
-    def save_config(self):
-        """Save current configuration to file"""
-        try:
-            os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
-            self.config["device_id"] = self.device_id
-            self.config["hotspot_ssid"] = f"RNG-Miner-{self.device_id}"
-            with open(self.config_path, 'w') as f:
-                json.dump(self.config, f, indent=2)
-        except Exception as e:
-            logging.error(f"Failed to save config: {e}")
-
-    def get_or_generate_device_id(self) -> str:
-        """Get existing device ID or generate new one"""
-        # Check if device ID already exists in config
-        if self.config.get("device_id"):
-            return self.config["device_id"]
-
-        # Generate new device ID
-        device_id = self.generate_device_id()
-        logging.info(f"Generated new device ID: {device_id}")
-        return device_id
-
-    def generate_device_id(self) -> str:
-        """Generate 8-character unique device ID based on hardware identifiers"""
-        try:
-            identifiers = []
-
-            # MAC address of wlan0 interface
-            try:
-                mac_address = self.get_interface_mac('wlan0')
-                identifiers.append(mac_address)
-            except:
-                pass
-
-            # CPU serial number
-            try:
-                with open('/proc/cpuinfo', 'r') as f:
-                    for line in f:
-                        if line.startswith('Serial'):
-                            serial = line.split(':')[1].strip()
-                            if serial and serial != "0000000000000000":
-                                identifiers.append(serial)
-                            break
-            except:
-                pass
-
-            # Machine ID
-            try:
-                with open('/etc/machine-id', 'r') as f:
-                    machine_id = f.read().strip()
-                    identifiers.append(machine_id)
-            except:
-                pass
-
-            # Hostname
-            try:
-                hostname = socket.gethostname()
-                identifiers.append(hostname)
-            except:
-                pass
-
-            # Fallback to timestamp if no hardware identifiers found
-            if not identifiers:
-                identifiers.append(str(int(time.time())))
-
-            # Create hash from all identifiers
-            combined = f"RNG-MINER-{'-'.join(identifiers)}"
-            hash_object = hashlib.sha256(combined.encode('utf-8'))
-            device_id = hash_object.hexdigest()[:8].upper()
-
-            return device_id
-
-        except Exception as e:
-            logging.error(f"Failed to generate device ID: {e}")
-            # Ultimate fallback
-            return hashlib.sha256(str(time.time()).encode()).hexdigest()[:8].upper()
-
-    def get_interface_mac(self, interface: str) -> str:
-        """Get MAC address of specified network interface"""
-        try:
-            with open(f'/sys/class/net/{interface}/address', 'r') as f:
+    def get_device_id(self):
+        """Get the device ID for hotspot SSID."""
+        if self.device_id_file.exists():
+            with open(self.device_id_file, 'r') as f:
                 return f.read().strip()
-        except:
-            # Fallback method
-            import uuid
-            return ':'.join(['{:02x}'.format((uuid.getnode() >> elements) & 0xff)
-                           for elements in range(0, 2*6, 2)][::-1])
+        return "UNKNOWN"
 
-    def setup_logging(self):
-        """Configure logging system"""
-        log_dir = "/opt/device-software/logs"
-        os.makedirs(log_dir, exist_ok=True)
-
-        log_file = os.path.join(log_dir, "wifi-manager.log")
-
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler(log_file),
-                logging.StreamHandler(sys.stdout)
-            ]
-        )
-
-        logging.info(f"WiFi Manager initializing - Device ID: {self.device_id}")
-
-    def create_hostapd_config(self) -> bool:
-        """Create hostapd configuration file"""
+    def run_command(self, command, check=True):
+        """Run a shell command and return result."""
         try:
-            os.makedirs(os.path.dirname(self.hostapd_config_path), exist_ok=True)
+            result = subprocess.run(
+                command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                check=check
+            )
+            return result.stdout.strip()
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Command failed: {command}")
+            logger.error(f"Error: {e.stderr}")
+            raise
 
-            ssid = f"RNG-Miner-{self.device_id}"
+    def generate_hostapd_config(self):
+        """Generate hostapd configuration file using proven working config."""
+        device_id = self.get_device_id()
+        ssid = f"RNG-Miner-{device_id}"
 
-            hostapd_config = f"""# Orange Pi WiFi Hotspot Configuration
-# Generated automatically - do not edit manually
-
-interface={self.hotspot_interface}
+        config = f"""# Ultra-minimal hostapd config to prevent crashes with unisoc_wifi
+interface=wlan0
 driver=nl80211
 ssid={ssid}
 hw_mode=g
-channel=7
-wmm_enabled=0
-macaddr_acl=0
+channel=6
 auth_algs=1
+wpa=0
+country_code=US
+wmm_enabled=0
+ieee80211n=0
 ignore_broadcast_ssid=0
-wpa=2
-wpa_passphrase={self.hotspot_password}
-wpa_key_mgmt=WPA-PSK
-wpa_pairwise=TKIP
-rsn_pairwise=CCMP
-
-# Additional security settings
-max_num_sta=5
-wpa_group_rekey=86400
+macaddr_acl=0
+logger_syslog=-1
+logger_syslog_level=0
+logger_stdout=-1
+logger_stdout_level=0
+ctrl_interface=/var/run/hostapd
 """
 
-            with open(self.hostapd_config_path, 'w') as f:
-                f.write(hostapd_config)
+        hostapd_conf = Path("/etc/hostapd/hostapd.conf")
+        with open(hostapd_conf, 'w') as f:
+            f.write(config)
 
-            # Set proper permissions
-            os.chmod(self.hostapd_config_path, 0o644)
+        logger.info(f"Generated hostapd config for SSID: {ssid}")
+        return ssid
 
-            logging.info(f"Created hostapd config for SSID: {ssid}")
-            return True
+    def generate_dnsmasq_config(self):
+        """Generate dnsmasq configuration using proven working setup."""
+        # Ensure dhcp directory exists
+        dhcp_dir = Path("/var/lib/dhcp")
+        dhcp_dir.mkdir(exist_ok=True)
+        leases_file = dhcp_dir / "dnsmasq.leases"
+        leases_file.touch()
 
-        except Exception as e:
-            logging.error(f"Failed to create hostapd config: {e}")
-            return False
-
-    def create_dnsmasq_config(self) -> bool:
-        """Create dnsmasq DHCP configuration file"""
-        try:
-            os.makedirs(os.path.dirname(self.dnsmasq_config_path), exist_ok=True)
-
-            dnsmasq_config = f"""# Orange Pi DHCP Server Configuration
-# Generated automatically - do not edit manually
-
-interface={self.hotspot_interface}
-dhcp-range={self.dhcp_range_start},{self.dhcp_range_end},255.255.255.0,24h
-dhcp-option=3,{self.hotspot_ip}
-dhcp-option=6,{self.hotspot_ip}
-server=8.8.8.8
+        config = """# Simple dnsmasq configuration
+interface=wlan0
 bind-interfaces
-bogus-priv
-domain-needed
+except-interface=lo
+
+# DHCP settings - match working PI-setup
+dhcp-range=192.168.4.2,192.168.4.20,255.255.255.0,12h
+dhcp-option=3,192.168.4.1
+dhcp-option=6,192.168.4.1
+
+# DNS settings
+no-resolv
+server=8.8.8.8
+server=8.8.4.4
+
+# Captive portal - redirect all DNS queries
+address=/#/192.168.4.1
+
+# Basic settings
+cache-size=150
+dhcp-leasefile=/var/lib/dhcp/dnsmasq.leases
+no-hosts
 """
 
-            with open(self.dnsmasq_config_path, 'w') as f:
-                f.write(dnsmasq_config)
+        dnsmasq_conf = Path("/etc/dnsmasq.conf")
 
-            # Set proper permissions
-            os.chmod(self.dnsmasq_config_path, 0o644)
+        # Backup original config
+        if dnsmasq_conf.exists() and not Path("/etc/dnsmasq.conf.backup").exists():
+            self.run_command(f"cp {dnsmasq_conf} /etc/dnsmasq.conf.backup")
 
-            logging.info(f"Created dnsmasq config for DHCP range: {self.dhcp_range_start}-{self.dhcp_range_end}")
-            return True
+        with open(dnsmasq_conf, 'w') as f:
+            f.write(config)
 
-        except Exception as e:
-            logging.error(f"Failed to create dnsmasq config: {e}")
-            return False
+        logger.info("Generated dnsmasq config")
 
-    def configure_network_interface(self) -> bool:
-        """Configure network interface for hotspot mode"""
+    def setup_interface(self):
+        """Set up wlan0 interface for hotspot using proven method."""
         try:
-            # Bring down interface
-            subprocess.run(['sudo', 'ip', 'link', 'set', self.hotspot_interface, 'down'],
-                         check=True, capture_output=True)
+            logger.info("Setting up wlan0 interface for hotspot...")
 
-            # Set static IP address
-            subprocess.run(['sudo', 'ip', 'addr', 'flush', 'dev', self.hotspot_interface],
-                         check=True, capture_output=True)
-            subprocess.run(['sudo', 'ip', 'addr', 'add', f'{self.hotspot_ip}/24', 'dev', self.hotspot_interface],
-                         check=True, capture_output=True)
+            # Stop conflicting services (like working version)
+            self.run_command("systemctl stop hostapd", check=False)
+            self.run_command("systemctl stop dnsmasq", check=False)
+            self.run_command("systemctl stop wpa_supplicant", check=False)
 
-            # Bring up interface
-            subprocess.run(['sudo', 'ip', 'link', 'set', self.hotspot_interface, 'up'],
-                         check=True, capture_output=True)
+            # Kill any existing processes
+            self.run_command("pkill -f hostapd", check=False)
+            self.run_command("pkill -f dnsmasq", check=False)
+            self.run_command("pkill -f wpa_supplicant.*wlan0", check=False)
 
-            logging.info(f"Configured {self.hotspot_interface} with IP {self.hotspot_ip}")
-            return True
+            # Wait for processes to stop
+            time.sleep(3)
 
-        except subprocess.CalledProcessError as e:
-            logging.error(f"Failed to configure network interface: {e}")
-            return False
-
-    def start_hostapd(self) -> bool:
-        """Start hostapd service"""
-        try:
-            # Kill any existing hostapd processes
-            self.stop_hostapd()
-
-            # Start hostapd
-            cmd = ['sudo', 'hostapd', '-B', '-P', self.hostapd_pid_file, self.hostapd_config_path]
-            result = subprocess.run(cmd, capture_output=True, text=True)
-
-            if result.returncode == 0:
-                logging.info("hostapd started successfully")
-                return True
-            else:
-                logging.error(f"Failed to start hostapd: {result.stderr}")
-                return False
-
-        except Exception as e:
-            logging.error(f"Exception starting hostapd: {e}")
-            return False
-
-    def stop_hostapd(self) -> bool:
-        """Stop hostapd service"""
-        try:
-            # Kill by PID file if exists
-            if os.path.exists(self.hostapd_pid_file):
-                with open(self.hostapd_pid_file, 'r') as f:
-                    pid = f.read().strip()
-                    if pid:
-                        subprocess.run(['sudo', 'kill', pid], capture_output=True)
-                os.remove(self.hostapd_pid_file)
-
-            # Kill any remaining hostapd processes
-            subprocess.run(['sudo', 'pkill', '-f', 'hostapd'], capture_output=True)
-
-            logging.info("hostapd stopped")
-            return True
-
-        except Exception as e:
-            logging.error(f"Error stopping hostapd: {e}")
-            return False
-
-    def start_dnsmasq(self) -> bool:
-        """Start dnsmasq DHCP service"""
-        try:
-            # Kill any existing dnsmasq processes
-            self.stop_dnsmasq()
-
-            # Start dnsmasq
-            cmd = ['sudo', 'dnsmasq', '-C', self.dnsmasq_config_path, '-x', self.dnsmasq_pid_file]
-            result = subprocess.run(cmd, capture_output=True, text=True)
-
-            if result.returncode == 0:
-                logging.info("dnsmasq started successfully")
-                return True
-            else:
-                logging.error(f"Failed to start dnsmasq: {result.stderr}")
-                return False
-
-        except Exception as e:
-            logging.error(f"Exception starting dnsmasq: {e}")
-            return False
-
-    def stop_dnsmasq(self) -> bool:
-        """Stop dnsmasq DHCP service"""
-        try:
-            # Kill by PID file if exists
-            if os.path.exists(self.dnsmasq_pid_file):
-                with open(self.dnsmasq_pid_file, 'r') as f:
-                    pid = f.read().strip()
-                    if pid:
-                        subprocess.run(['sudo', 'kill', pid], capture_output=True)
-                os.remove(self.dnsmasq_pid_file)
-
-            # Kill any remaining dnsmasq processes
-            subprocess.run(['sudo', 'pkill', '-f', 'dnsmasq'], capture_output=True)
-
-            logging.info("dnsmasq stopped")
-            return True
-
-        except Exception as e:
-            logging.error(f"Error stopping dnsmasq: {e}")
-            return False
-
-    def is_hotspot_active(self) -> bool:
-        """Check if hotspot is currently active"""
-        try:
-            # Check if hostapd is running
-            if os.path.exists(self.hostapd_pid_file):
-                with open(self.hostapd_pid_file, 'r') as f:
-                    pid = f.read().strip()
-                    if pid:
-                        try:
-                            subprocess.run(['ps', '-p', pid], check=True, capture_output=True)
-                            return True
-                        except subprocess.CalledProcessError:
-                            pass
-
-            # Check for hostapd process
-            result = subprocess.run(['pgrep', '-f', 'hostapd'], capture_output=True)
-            return result.returncode == 0
-
-        except Exception as e:
-            logging.error(f"Error checking hotspot status: {e}")
-            return False
-
-    def get_connected_clients(self) -> List[Dict]:
-        """Get list of connected clients"""
-        clients = []
-        try:
-            # Read DHCP leases file
-            leases_file = "/var/lib/dhcp/dhcpd.leases"
-            if os.path.exists(leases_file):
-                with open(leases_file, 'r') as f:
-                    content = f.read()
-                    # Parse DHCP leases (simplified)
-                    # In production, would need more robust parsing
-
-            # Alternative: parse dnsmasq leases
-            dnsmasq_leases = "/var/lib/dhcp/dnsmasq.leases"
-            if os.path.exists(dnsmasq_leases):
-                with open(dnsmasq_leases, 'r') as f:
-                    for line in f:
-                        parts = line.strip().split()
-                        if len(parts) >= 4:
-                            clients.append({
-                                'ip': parts[2],
-                                'mac': parts[1],
-                                'hostname': parts[3] if len(parts) > 3 else 'unknown',
-                                'lease_time': parts[0]
-                            })
-
-        except Exception as e:
-            logging.error(f"Error getting connected clients: {e}")
-
-        return clients
-
-    def start_hotspot(self) -> bool:
-        """Start WiFi hotspot with full configuration"""
-        try:
-            logging.info("Starting WiFi hotspot...")
-
-            # Save current configuration
-            self.save_config()
-
-            # Create configuration files
-            if not self.create_hostapd_config():
-                return False
-
-            if not self.create_dnsmasq_config():
-                return False
-
-            # Configure network interface
-            if not self.configure_network_interface():
-                return False
-
-            # Start services
-            if not self.start_hostapd():
-                return False
-
-            # Wait a moment for hostapd to stabilize
+            # Bring interface down
+            self.run_command("ip link set dev wlan0 down", check=False)
             time.sleep(2)
 
-            if not self.start_dnsmasq():
-                self.stop_hostapd()
-                return False
+            # Flush any existing addresses
+            self.run_command("ip addr flush dev wlan0", check=False)
 
-            self.hotspot_active = True
+            # Disable NetworkManager management
+            self.run_command("nmcli device set wlan0 managed no", check=False)
+            time.sleep(1)
 
-            ssid = f"RNG-Miner-{self.device_id}"
-            logging.info(f"WiFi hotspot '{ssid}' started successfully")
-            logging.info(f"Hotspot IP: {self.hotspot_ip}")
-            logging.info(f"DHCP range: {self.dhcp_range_start} - {self.dhcp_range_end}")
+            # Bring interface up
+            self.run_command("ip link set dev wlan0 up")
+            time.sleep(2)
 
-            return True
+            # Set static IP (matching proven working version)
+            self.run_command("ip addr add 192.168.4.1/24 dev wlan0")
+            time.sleep(2)
+
+            # Verify interface and IP
+            result = self.run_command("ip addr show wlan0")
+            if "192.168.4.1" not in result:
+                raise Exception("Failed to assign IP address to wlan0")
+
+            logger.info("Interface wlan0 configured successfully: 192.168.4.1/24")
 
         except Exception as e:
-            logging.error(f"Failed to start hotspot: {e}")
-            self.stop_hotspot()
-            return False
+            logger.error(f"Failed to setup interface: {e}")
+            raise
 
-    def stop_hotspot(self) -> bool:
-        """Stop WiFi hotspot"""
+    def start_hotspot(self):
+        """Start WiFi hotspot using direct method (no systemd)."""
         try:
-            logging.info("Stopping WiFi hotspot...")
+            if self.hotspot_active:
+                logger.info("Hotspot already active")
+                return
+
+            logger.info("Starting WiFi hotspot...")
+
+            # Generate configurations
+            ssid = self.generate_hostapd_config()
+            self.generate_dnsmasq_config()
+
+            # Setup network interface
+            self.setup_interface()
+
+            # Enable IP forwarding
+            self.run_command("echo 1 > /proc/sys/net/ipv4/ip_forward")
+
+            # Stop systemd-resolved to free port 53 (CRITICAL)
+            logger.info("Stopping systemd-resolved to free port 53...")
+            self.run_command("systemctl stop systemd-resolved", check=False)
+            time.sleep(2)
+
+            # Kill any existing dnsmasq processes
+            self.run_command("pkill -f dnsmasq", check=False)
+            time.sleep(2)
+
+            # Test dnsmasq configuration before starting
+            logger.info("Testing dnsmasq configuration...")
+            try:
+                self.run_command("dnsmasq --test --conf-file=/etc/dnsmasq.conf")
+                logger.info("Dnsmasq configuration is valid")
+            except:
+                logger.warning("Dnsmasq config test failed, proceeding anyway...")
+
+            # Start dnsmasq directly with specific binding (bypass systemd)
+            logger.info("Starting dnsmasq directly with interface binding...")
+            self.run_command("dnsmasq --interface=wlan0 --bind-interfaces --listen-address=192.168.4.1 --conf-file=/etc/dnsmasq.conf &")
+            time.sleep(3)
+
+            # Verify dnsmasq is running
+            try:
+                self.run_command("pgrep dnsmasq")
+                logger.info("Dnsmasq is running")
+            except:
+                raise Exception("Dnsmasq failed to start")
+
+            # Kill any existing hostapd processes
+            self.run_command("pkill -f hostapd", check=False)
+            time.sleep(2)
+
+            # Start hostapd directly (bypass systemd)
+            logger.info("Starting hostapd directly...")
+            self.run_command("hostapd -B /etc/hostapd/hostapd.conf")
+            time.sleep(3)
+
+            # Verify hostapd is running
+            try:
+                self.run_command("pgrep hostapd")
+                logger.info("Hostapd is running")
+            except:
+                raise Exception("Hostapd failed to start")
+
+            # Final verification
+            self.run_command("ip addr show wlan0")
+
+            self.hotspot_active = True
+            logger.info(f"✅ WiFi hotspot started successfully: {ssid}")
+            logger.info("AP Available at: http://192.168.4.1")
+
+        except Exception as e:
+            logger.error(f"Failed to start hotspot: {e}")
+            self.stop_hotspot()  # Cleanup on failure
+            raise
+
+    def stop_hotspot(self):
+        """Stop WiFi hotspot."""
+        try:
+            logger.info("Stopping WiFi hotspot...")
 
             # Stop services
-            self.stop_dnsmasq()
-            self.stop_hostapd()
+            self.run_command("systemctl stop hostapd", check=False)
+            self.run_command("systemctl stop dnsmasq", check=False)
 
-            # Reset network interface (optional)
+            # Restore NetworkManager control
+            self.run_command("nmcli device set wlan0 managed yes", check=False)
+
+            # Flush interface
+            self.run_command("ip addr flush dev wlan0", check=False)
+
+            self.hotspot_active = False
+            logger.info("WiFi hotspot stopped")
+
+        except Exception as e:
+            logger.error(f"Error stopping hotspot: {e}")
+
+    def get_hotspot_status(self):
+        """Get current hotspot status."""
+        try:
+            # Check if hostapd is running
             try:
-                subprocess.run(['sudo', 'ip', 'addr', 'flush', 'dev', self.hotspot_interface],
-                             capture_output=True)
-                subprocess.run(['sudo', 'ip', 'link', 'set', self.hotspot_interface, 'down'],
-                             capture_output=True)
+                self.run_command("systemctl is-active hostapd")
+                hostapd_active = True
+            except:
+                hostapd_active = False
+
+            # Check if dnsmasq is running
+            try:
+                self.run_command("systemctl is-active dnsmasq")
+                dnsmasq_active = True
+            except:
+                dnsmasq_active = False
+
+            # Count connected clients
+            connected_clients = 0
+            try:
+                # Check DHCP leases - use correct location
+                leases_file = Path("/var/lib/dhcp/dnsmasq.leases")
+                if leases_file.exists():
+                    with open(leases_file, 'r') as f:
+                        content = f.read()
+                        # Count active leases more accurately
+                        connected_clients = len([line for line in content.split('\n') if line.strip() and not line.startswith('#')])
+                else:
+                    connected_clients = 0
             except:
                 pass
 
-            self.hotspot_active = False
-            logging.info("WiFi hotspot stopped")
+            device_id = self.get_device_id()
+            ssid = f"RNG-Miner-{device_id}"
 
-            return True
+            return {
+                "active": hostapd_active and dnsmasq_active,
+                "ssid": ssid if hostapd_active else None,
+                "clients": connected_clients,
+                "services": {
+                    "hostapd": hostapd_active,
+                    "dnsmasq": dnsmasq_active
+                }
+            }
 
         except Exception as e:
-            logging.error(f"Error stopping hotspot: {e}")
-            return False
+            logger.error(f"Error getting hotspot status: {e}")
+            return {
+                "active": False,
+                "ssid": None,
+                "clients": 0,
+                "error": str(e)
+            }
 
-    def restart_hotspot(self) -> bool:
-        """Restart WiFi hotspot"""
-        logging.info("Restarting WiFi hotspot...")
+    def connect_to_wifi(self, ssid, password):
+        """Connect to WiFi network."""
+        try:
+            logger.info(f"Connecting to WiFi: {ssid}")
 
-        if not self.stop_hotspot():
-            logging.error("Failed to stop hotspot for restart")
-            return False
+            # Stop hotspot first
+            self.stop_hotspot()
 
-        # Wait a moment between stop and start
-        time.sleep(3)
+            # Create NetworkManager connection
+            cmd = f'nmcli device wifi connect "{ssid}" password "{password}"'
+            self.run_command(cmd)
 
-        return self.start_hotspot()
+            # Wait for connection
+            time.sleep(10)
 
-    def get_hotspot_status(self) -> Dict:
-        """Get comprehensive hotspot status information"""
-        return {
-            'active': self.is_hotspot_active(),
-            'device_id': self.device_id,
-            'ssid': f"RNG-Miner-{self.device_id}",
-            'ip_address': self.hotspot_ip,
-            'dhcp_range': f"{self.dhcp_range_start} - {self.dhcp_range_end}",
-            'connected_clients': self.get_connected_clients(),
-            'interface': self.hotspot_interface,
-            'password': self.hotspot_password,
-            'timestamp': datetime.now(timezone.utc).isoformat()
-        }
+            # Verify connection
+            result = self.run_command("nmcli -t -f WIFI g")
+            if "enabled" in result:
+                logger.info(f"✅ Connected to WiFi: {ssid}")
+            else:
+                raise Exception("WiFi connection failed")
 
-def main():
-    """Main entry point for WiFi manager"""
-    import argparse
+        except Exception as e:
+            logger.error(f"Failed to connect to WiFi: {e}")
+            # Restart hotspot on failure
+            self.start_hotspot()
+            raise
 
-    parser = argparse.ArgumentParser(description='Orange Pi WiFi Manager')
-    parser.add_argument('action', choices=['start', 'stop', 'restart', 'status'],
-                       help='Action to perform')
+    def get_status(self):
+        """Get current WiFi status."""
+        try:
+            # Check if connected to WiFi
+            try:
+                result = self.run_command("nmcli -t -f ACTIVE,SSID dev wifi | grep '^yes'")
+                if result:
+                    connected_ssid = result.split(':')[1]
+                    return {
+                        "state": "CONNECTED",
+                        "ssid": connected_ssid,
+                        "mode": "client"
+                    }
+            except:
+                pass
 
-    args = parser.parse_args()
+            # Check hotspot status
+            hotspot_status = self.get_hotspot_status()
+            if hotspot_status["active"]:
+                return {
+                    "state": "HOTSPOT",
+                    "ssid": hotspot_status["ssid"],
+                    "mode": "hotspot",
+                    "clients": hotspot_status["clients"]
+                }
 
-    wifi_manager = WiFiManager()
+            return {
+                "state": "DISCONNECTED",
+                "mode": "unknown"
+            }
 
-    try:
-        if args.action == 'start':
-            success = wifi_manager.start_hotspot()
-            sys.exit(0 if success else 1)
-        elif args.action == 'stop':
-            success = wifi_manager.stop_hotspot()
-            sys.exit(0 if success else 1)
-        elif args.action == 'restart':
-            success = wifi_manager.restart_hotspot()
-            sys.exit(0 if success else 1)
-        elif args.action == 'status':
-            status = wifi_manager.get_hotspot_status()
-            print(json.dumps(status, indent=2))
-            sys.exit(0)
-    except KeyboardInterrupt:
-        wifi_manager.stop_hotspot()
-    except Exception as e:
-        logging.error(f"WiFi Manager error: {e}")
+        except Exception as e:
+            logger.error(f"Error getting WiFi status: {e}")
+            return {
+                "state": "ERROR",
+                "error": str(e)
+            }
+
+# Command-line interface
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: wifi_manager.py {start_hotspot|stop_hotspot|status}")
         sys.exit(1)
 
-if __name__ == "__main__":
-    main()
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s'
+    )
+
+    manager = WiFiManager()
+    command = sys.argv[1]
+
+    if command == "start_hotspot":
+        manager.start_hotspot()
+    elif command == "stop_hotspot":
+        manager.stop_hotspot()
+    elif command == "status":
+        status = manager.get_status()
+        print(json.dumps(status, indent=2))
+    else:
+        print(f"Unknown command: {command}")
+        sys.exit(1)

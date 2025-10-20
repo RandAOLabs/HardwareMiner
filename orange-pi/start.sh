@@ -95,15 +95,13 @@ fi
 if [[ "$WIFI_CONNECTED" == "false" ]]; then
     log "📡 Starting hotspot mode..."
 
-    # Try to find wifi_manager.py in multiple locations
-    WIFI_MANAGER_SCRIPT=""
-    for path in "$INSTALL_DIR/wifi_manager.py" "/opt/device-software/wifi_manager.py" "/opt/device-software/src/wifi-manager/wifi_manager.py"; do
-        if [[ -f "$path" ]]; then
-            WIFI_MANAGER_SCRIPT="$path"
-            log "Found wifi_manager at: $path"
-            break
-        fi
-    done
+    # WiFi manager is at the organized location
+    WIFI_MANAGER_SCRIPT="/opt/device-software/src/wifi-manager/wifi_manager.py"
+    if [[ -f "$WIFI_MANAGER_SCRIPT" ]]; then
+        log "Found wifi_manager at: $WIFI_MANAGER_SCRIPT"
+    else
+        log "⚠️ WiFi manager not found at: $WIFI_MANAGER_SCRIPT"
+    fi
 
     # Try Python WiFi manager first
     if [[ -n "$WIFI_MANAGER_SCRIPT" ]]; then
@@ -116,13 +114,14 @@ if [[ "$WIFI_CONNECTED" == "false" ]]; then
     else
         log "⚠️ WiFi manager script not found, trying direct AP script..."
 
-        # Fallback to direct AP script
-        if [[ -f "$INSTALL_DIR/start_ap_direct.sh" ]]; then
-            chmod +x "$INSTALL_DIR/start_ap_direct.sh"
+        # Fallback to direct AP script (now in organized location)
+        DIRECT_AP_SCRIPT="/opt/device-software/scripts/core/start_ap_direct.sh"
+        if [[ -f "$DIRECT_AP_SCRIPT" ]]; then
+            chmod +x "$DIRECT_AP_SCRIPT"
 
             log "Starting AP via direct script..."
             # Start AP in background
-            "$INSTALL_DIR/start_ap_direct.sh" &
+            "$DIRECT_AP_SCRIPT" &
             AP_PID=$!
 
             # Give it time to start
@@ -136,7 +135,7 @@ if [[ "$WIFI_CONNECTED" == "false" ]]; then
                 log "❌ Direct AP script failed to start"
             fi
         else
-            log "❌ Direct AP script not found at: $INSTALL_DIR/start_ap_direct.sh"
+            log "❌ Direct AP script not found at: $DIRECT_AP_SCRIPT"
         fi
     fi
 else

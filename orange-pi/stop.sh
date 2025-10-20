@@ -44,17 +44,16 @@ if [[ -f /var/run/rng-miner-ap.pid ]]; then
 fi
 
 # Stop WiFi hotspot using Python manager
-if [[ -d "$INSTALL_DIR" ]] && [[ -f "$INSTALL_DIR/wifi_manager.py" ]]; then
-    cd "$INSTALL_DIR"
-
-    # Try to activate virtual environment
-    if [[ -f venv/bin/activate ]]; then
-        source venv/bin/activate 2>/dev/null || true
+WIFI_MANAGER_SCRIPT="/opt/device-software/src/wifi-manager/wifi_manager.py"
+if [[ -f "$WIFI_MANAGER_SCRIPT" ]]; then
+    # Try to activate virtual environment if it exists
+    if [[ -f "$INSTALL_DIR/venv/bin/activate" ]]; then
+        source "$INSTALL_DIR/venv/bin/activate" 2>/dev/null || true
     fi
 
     python3 -c "
 import sys
-sys.path.insert(0, '$INSTALL_DIR')
+sys.path.insert(0, '/opt/device-software/src/wifi-manager')
 try:
     from wifi_manager import WiFiManager
     wifi_manager = WiFiManager()
@@ -76,6 +75,7 @@ systemctl stop dnsmasq 2>/dev/null && log "🌐 dnsmasq service stopped" || true
 pkill -f hostapd 2>/dev/null && log "🔄 Killed remaining hostapd processes" || true
 pkill -f dnsmasq 2>/dev/null && log "🔄 Killed remaining dnsmasq processes" || true
 pkill -f "start_ap_direct.sh" 2>/dev/null && log "🔄 Killed direct AP scripts" || true
+pkill -f "core/start_ap_direct.sh" 2>/dev/null || true
 
 # Reset wlan0 interface
 INTERFACE="wlan0"

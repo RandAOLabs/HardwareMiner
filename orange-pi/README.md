@@ -56,14 +56,46 @@ sudo /opt/rng-miner/stop.sh
 sudo /opt/rng-miner/restart.sh
 ```
 
-## Files Included
+## Repository Structure
 
-- `install.sh` - Main installation script
-- `server.py` - HTTP server with all endpoints
-- `wifi_manager.py` - WiFi hotspot and connection management
-- `requirements.txt` - Python dependencies
-- `generate-config.sh` - SSL certificate generation
-- `start.sh`, `stop.sh`, `restart.sh` - Service control scripts
+```
+orange-pi/
+├── README.md                   # This file
+├── API_DOCUMENTATION.md        # API endpoint documentation
+├── requirements.txt            # Python dependencies
+│
+├── install.sh                  # One-time installation script
+├── start.sh                    # Main service startup (used by systemd)
+├── stop.sh                     # Service shutdown
+├── restart.sh                  # Service restart
+│
+└── opt/device-software/
+    ├── src/
+    │   ├── http-server/
+    │   │   └── server.py             # Flask HTTP API server
+    │   └── wifi-manager/
+    │       └── wifi_manager.py       # WiFi hotspot management
+    │
+    ├── scripts/
+    │   ├── core/                     # Core functionality
+    │   │   ├── wifi_connect.py       # WiFi client connection
+    │   │   └── start_ap_direct.sh    # Emergency AP fallback
+    │   ├── setup/                    # Setup scripts
+    │   │   └── generate-config.sh    # Device ID generation
+    │   ├── utils/                    # Utilities and diagnostics
+    │   │   ├── diagnostics.sh        # System diagnostics
+    │   │   ├── fix_resolvconf.sh     # DNS fix utility
+    │   │   ├── force-restart.sh      # Force clean restart
+    │   │   └── wifi_status.sh        # WiFi status checker
+    │   └── tests/                    # Test scripts
+    │       ├── test_server.sh        # HTTP server tests
+    │       └── run-tests.sh          # Test runner
+    │
+    └── tests/
+        ├── test_http_server.py       # HTTP server unit tests
+        ├── test_wifi_hotspot.py      # WiFi hotspot tests
+        └── requirements-test.txt     # Test dependencies
+```
 
 ## Troubleshooting
 
@@ -73,21 +105,19 @@ sudo systemctl restart rng-miner
 sudo journalctl -u rng-miner -f
 ```
 
+**Run diagnostics:**
+```bash
+sudo /opt/device-software/scripts/utils/diagnostics.sh
+```
+
 **Check WiFi status:**
 ```bash
-sudo /opt/rng-miner/venv/bin/python3 -c "
-from wifi_manager import WiFiManager
-print(WiFiManager().get_hotspot_status())
-"
+sudo /opt/device-software/scripts/utils/wifi_status.sh
 ```
 
 **Manual hotspot start:**
 ```bash
-cd /opt/rng-miner
-sudo ./venv/bin/python3 -c "
-from wifi_manager import WiFiManager
-WiFiManager().start_hotspot()
-"
+sudo python3 /opt/device-software/src/wifi-manager/wifi_manager.py start_hotspot
 ```
 
 ## Expected Device ID Format

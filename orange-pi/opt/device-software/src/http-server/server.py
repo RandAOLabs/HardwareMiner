@@ -519,7 +519,7 @@ class EnhancedDeviceServer:
                         self.logger.info(f"Background: Initiating WiFi connection to {ssid}")
                         subprocess.run([
                             'python3',
-                            '/opt/device-software/scripts/wifi_connect.py',
+                            '/opt/device-software/scripts/core/wifi_connect.py',
                             ssid,
                             password
                         ], timeout=60)
