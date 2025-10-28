@@ -206,17 +206,27 @@ class EnhancedDeviceServer:
         except:
             ip_address = "unknown"
 
-        # Check WiFi connection status (simplified)
+        # Check WiFi connection status using NetworkManager (same as wifi_connect.py)
         wifi_connected = False
         wifi_ssid = None
         try:
-            # Try to get WiFi info
-            result = subprocess.run(['iwgetid', '-r'], capture_output=True, text=True)
-            if result.returncode == 0 and result.stdout.strip():
-                wifi_ssid = result.stdout.strip()
-                wifi_connected = True
-        except:
-            pass
+            # Use nmcli to check active WiFi connection (matches wifi_status.sh method)
+            result = subprocess.run(
+                ['nmcli', '-t', '-f', 'ACTIVE,SSID', 'dev', 'wifi'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+
+            if result.returncode == 0:
+                # Look for line starting with "yes:" which indicates active connection
+                for line in result.stdout.strip().split('\n'):
+                    if line.startswith('yes:'):
+                        wifi_ssid = line.split(':', 1)[1] if ':' in line else None
+                        wifi_connected = True
+                        break
+        except Exception as e:
+            self.logger.warning(f"Failed to check WiFi status: {e}")
 
         return {
             'device_id': self.device_id,

@@ -48,6 +48,17 @@ def run_cmd(cmd, check=True, shell=True, timeout=30):
             raise
         return e.stderr, e.returncode
 
+def wait_for_condition(condition_func, timeout=10, interval=0.5, description="condition"):
+    """Wait for a condition to be true with timeout"""
+    start = time.time()
+    while time.time() - start < timeout:
+        if condition_func():
+            logger.info(f"✓ {description} met after {time.time() - start:.1f}s")
+            return True
+        time.sleep(interval)
+    logger.warning(f"⚠ Timeout waiting for {description} after {timeout}s")
+    return False
+
 def teardown_ap_mode():
     """Completely tear down AP mode services and configuration"""
     logger.info("🔻 TEARDOWN: Stopping AP mode services...")
@@ -56,68 +67,83 @@ def teardown_ap_mode():
     logger.info("Stopping systemd services gracefully...")
     run_cmd("systemctl stop hostapd", check=False)
     run_cmd("systemctl stop dnsmasq", check=False)
-    time.sleep(3)  # Give services time to stop gracefully
 
-    # 2. Kill any remaining processes (not too aggressive initially)
-    logger.info("Killing remaining AP processes...")
+    # Wait for services to stop (poll instead of blind sleep)
+    wait_for_condition(
+        lambda: run_cmd("pgrep -f 'hostapd|dnsmasq'", check=False)[1] != 0,
+        timeout=5,
+        interval=0.3,
+        description="AP services to stop"
+    )
+
+    # 2. Kill any remaining processes
+    logger.info("Ensuring AP processes are stopped...")
     run_cmd("pkill -f hostapd", check=False)
     run_cmd("pkill -f dnsmasq", check=False)
-    time.sleep(2)
+    time.sleep(0.5)
 
-    # 3. Reset interface completely (like old-bad-way)
+    # 3. Reset interface completely
     logger.info("Resetting wlan0 interface...")
     run_cmd("ip addr flush dev wlan0", check=False)
     run_cmd("ip link set dev wlan0 down", check=False)
-    time.sleep(2)
+    time.sleep(1)
 
     # 4. Bring interface back up (critical - do this BEFORE NetworkManager config)
     logger.info("Bringing wlan0 back up...")
     run_cmd("ip link set dev wlan0 up", check=False)
-    time.sleep(2)
+    time.sleep(1)
 
     # 5. Re-enable NetworkManager management
     logger.info("Re-enabling NetworkManager management...")
     run_cmd("nmcli device set wlan0 managed yes", check=False)
-
-    # Remove unmanaged config if it exists
     run_cmd("rm -f /etc/NetworkManager/conf.d/99-unmanaged-devices.conf", check=False)
-    time.sleep(2)
+    time.sleep(1)
 
     # 6. Restart NetworkManager (after interface is up)
     logger.info("Restarting NetworkManager...")
     run_cmd("systemctl restart NetworkManager", check=False)
-    time.sleep(5)  # Give NM time to fully restart and detect interfaces
 
-    # 7. Restart systemd-resolved (old-bad-way does this)
+    # Wait for NetworkManager to be active (poll instead of blind 5s sleep)
+    wait_for_condition(
+        lambda: run_cmd("systemctl is-active NetworkManager", check=False)[0] == "active",
+        timeout=8,
+        interval=0.5,
+        description="NetworkManager to become active"
+    )
+
+    # 7. Restart systemd-resolved
     logger.info("Starting systemd-resolved...")
     run_cmd("systemctl start systemd-resolved", check=False)
-    time.sleep(2)
+    time.sleep(1)
 
     # 8. Ensure WiFi radio is on
     logger.info("Enabling WiFi radio...")
     run_cmd("nmcli radio wifi on", check=False)
-    time.sleep(2)
 
-    # 9. Wait for NetworkManager to be fully ready
+    # Poll for WiFi radio to be enabled
+    wait_for_condition(
+        lambda: "enabled" in run_cmd("nmcli radio wifi", check=False)[0].lower(),
+        timeout=3,
+        interval=0.3,
+        description="WiFi radio to be enabled"
+    )
+
+    # 9. Wait for NetworkManager to detect wlan0 properly
     logger.info("Waiting for NetworkManager to stabilize...")
-    nm_ready = False
-    for i in range(10):
-        output, rc = run_cmd("nmcli device status | grep wlan0", check=False, timeout=10)
-        logger.info(f"NetworkManager check {i+1}/10: {output}")
-
-        if output and rc == 0:
-            # Check that wlan0 is not in bad states
-            if "unavailable" not in output.lower() and "unmanaged" not in output.lower():
-                logger.info("NetworkManager ready!")
-                nm_ready = True
-                break
-
-        time.sleep(2)
+    nm_ready = wait_for_condition(
+        lambda: (
+            "unavailable" not in run_cmd("nmcli device status | grep wlan0", check=False)[0].lower() and
+            "unmanaged" not in run_cmd("nmcli device status | grep wlan0", check=False)[0].lower() and
+            run_cmd("nmcli device status | grep wlan0", check=False)[1] == 0
+        ),
+        timeout=15,
+        interval=1,
+        description="NetworkManager to recognize wlan0"
+    )
 
     if not nm_ready:
         logger.warning("NetworkManager may not be fully ready, proceeding anyway...")
-
-    time.sleep(3)  # Extra buffer like old-bad-way's adaptive sleep
+        time.sleep(2)  # Small buffer if polling failed
 
     logger.info("✅ AP mode teardown complete")
     return True
@@ -127,26 +153,37 @@ def connect_to_wifi(ssid, password):
     logger.info(f"🔌 CONNECT: Attempting to connect to '{ssid}'...")
 
     try:
-        # Stop any conflicting services (like old-bad-way does)
+        # Stop any conflicting services
         logger.info("Ensuring hostapd and dnsmasq are stopped...")
         run_cmd("systemctl stop hostapd", check=False)
         run_cmd("systemctl stop dnsmasq", check=False)
-        time.sleep(2)
+        time.sleep(1)
 
         # Restart wpa_supplicant first (old-bad-way pattern)
         logger.info("Restarting wpa_supplicant...")
         run_cmd("systemctl stop wpa_supplicant", check=False)
-        time.sleep(2)
+        time.sleep(1)
         run_cmd("systemctl start wpa_supplicant", check=False)
-        time.sleep(3)
 
-        # Give NetworkManager time to settle after wpa_supplicant restart
-        time.sleep(2)
+        # Wait for wpa_supplicant to be active
+        wait_for_condition(
+            lambda: run_cmd("systemctl is-active wpa_supplicant", check=False)[0] == "active",
+            timeout=5,
+            interval=0.5,
+            description="wpa_supplicant to start"
+        )
 
-        # Scan for the network (with proper waits)
+        # Scan for the network
         logger.info("Scanning for WiFi networks...")
         run_cmd("nmcli device wifi rescan", check=False)
-        time.sleep(5)  # Wait for scan to complete
+
+        # Poll for scan completion (faster than blind 5s wait)
+        wait_for_condition(
+            lambda: len(run_cmd("nmcli -t -f SSID dev wifi list", check=False)[0].split('\n')) > 1,
+            timeout=8,
+            interval=0.5,
+            description="WiFi scan to complete"
+        )
 
         # List available networks for debugging
         logger.info("Checking available networks...")
@@ -168,7 +205,7 @@ def connect_to_wifi(ssid, password):
         # Delete any existing connection with same name to avoid conflicts
         logger.info(f"Removing any existing connection for '{ssid}'...")
         run_cmd(f'nmcli connection delete "{ssid}"', check=False)
-        time.sleep(2)
+        time.sleep(1)
 
         # Connect to network (following old-bad-way pattern)
         logger.info(f"Connecting to '{ssid}' using NetworkManager...")
@@ -200,37 +237,40 @@ def connect_to_wifi(ssid, password):
 
             up_output, up_rc = run_cmd(f'nmcli connection up "{ssid}"', timeout=30, check=False)
             logger.info(f"Connection up result (rc={up_rc}): {up_output}")
-            time.sleep(5)
+            time.sleep(2)
         else:
             logger.info(f"nmcli connect command succeeded: {output}")
 
-        # Wait for connection to establish (old-bad-way uses 6 iterations of 5 seconds)
+        # Wait for connection to establish using smart polling with exponential backoff
         logger.info("Waiting for WiFi connection...")
-        connection_established = False
-        for attempt in range(6):
-            time.sleep(5)
-
-            # Check using nmcli general state (like old-bad-way)
-            state_output, state_rc = run_cmd("nmcli -t -f STATE general", check=False, timeout=10)
-            logger.info(f"Connection attempt {attempt + 1}/6 - General state: {state_output}")
-
-            if state_output and "connected" in state_output.lower():
-                logger.info(f"WiFi connection established after {(attempt + 1) * 5} seconds")
-                connection_established = True
-                break
+        connection_established = wait_for_condition(
+            lambda: "connected" in run_cmd("nmcli -t -f STATE general", check=False, timeout=5)[0].lower(),
+            timeout=25,
+            interval=1,
+            description="WiFi connection to establish"
+        )
 
         if not connection_established:
             logger.warning("Connection polling completed without detecting 'connected' state")
 
-        # Final connection check (check both WiFi and IP like old-bad-way)
+        # Final connection check (check both WiFi and IP)
         wifi_check, _ = run_cmd("nmcli -t -f WIFI general", check=False)
         if "enabled" in wifi_check.lower():
             state_check, _ = run_cmd("nmcli -t -f STATE general", check=False)
             if "connected" in state_check.lower():
-                # Double-check we have IP
-                time.sleep(3)
-                ip_output, _ = run_cmd("ip addr show wlan0 | grep 'inet '", check=False)
-                if ip_output and "inet " in ip_output and "192.168.4.1" not in ip_output:
+                # Wait for IP address with polling (instead of blind 3s sleep)
+                ip_ready = wait_for_condition(
+                    lambda: (
+                        "inet " in run_cmd("ip addr show wlan0 | grep 'inet '", check=False)[0] and
+                        "192.168.4.1" not in run_cmd("ip addr show wlan0 | grep 'inet '", check=False)[0]
+                    ),
+                    timeout=5,
+                    interval=0.5,
+                    description="IP address assignment"
+                )
+
+                if ip_ready:
+                    ip_output, _ = run_cmd("ip addr show wlan0 | grep 'inet '", check=False)
                     logger.info(f"✅ Successfully connected to '{ssid}'")
                     logger.info(f"IP Address: {ip_output}")
                     return True
